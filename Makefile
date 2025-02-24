@@ -6,25 +6,25 @@
 
 
 CC= gcc
-CFLAGS= -g -Wall
+CFLAGS= -g -Wall -pedantic 
 LIBS = 
 
 OBJS = networks.o gethostbyname.o pollLib.o safeUtil.o
 
 #uncomment next two lines if your using sendtoErr() library
-#LIBS += libcpe464.2.21.a -lstdc++ -ldl
-#CFLAGS += -D__LIBCPE464_
+LIBS += libcpe464.2.21.a -lstdc++ -ldl
+CFLAGS += -D__LIBCPE464_
 
 
 all: udpAll
 
-udpAll: server rcopy
+udpAll: rcopy server
 
-udpClient: server.c $(OBJS) 
-	$(CC) $(CFLAGS) -o server server.c $(OBJS) $(LIBS)
+rcopy: rcopy.c $(OBJS) 
+	$(CC) $(CFLAGS) -o rcopy rcopy.c $(OBJS) $(LIBS)
 
-udpServer: rcopy.c $(OBJS) 
-	$(CC) $(CFLAGS) -o rcopy rcopy.c  $(OBJS) $(LIBS)
+server: server.c $(OBJS) 
+	$(CC) $(CFLAGS) -o server server.c  $(OBJS) $(LIBS)
 
 .c.o:
 	gcc -c $(CFLAGS) $< -o $@ $(LIBS)
@@ -33,8 +33,4 @@ cleano:
 	rm -f *.o
 
 clean:
-	rm -f server rcopy *.o
-
-
-
-
+	rm -f rcopy server *.o
