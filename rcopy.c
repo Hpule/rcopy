@@ -11,140 +11,160 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <math.h>
 
 #include "gethostbyname.h"
 #include "networks.h"
 #include "safeUtil.h"
 #include "cpe464.h"
+#include "pollLib.h"
+#include "windowBuffer.h"
+#include "helperFunctions.h"
 
-typedef struct __attribute__((packed)){
-	uint32_t seq; 
-	uint16_t checksum; 
-	uint8_t flag; 
-} pdu_header; 
-
-#define MAXBUF 80
-#define MAX_FILENAME 100
-#define HEADER_SIZE sizeof(pdu_header)
-#define MAX_PACKET_SIZE 256  // Adjust this size as needed
-
-int readFromStdin(char * buffer);
-int checkArgs(int argc, char * argv[]);
+int  readFromStdin(char * buffer);
+int  checkArgs(int argc, char * argv[]);
 void talkToServer(int socketNum, struct sockaddr_in6 * server);
 void sendFilename(int socketNum, struct sockaddr_in6 * server, char* filename, int buffersize, int windowsize); 
+void runRcopy(int socketNum, struct sockaddr_in6 * server); 
+void processACK(); 
+void processPacket(); 
 
 int main (int argc, char *argv[])
  {
 	int socketNum = 0;				
 	struct sockaddr_in6 server;		// Supports 4 and 6 but requires IPv6 struct
 	int portNumber = 0;
+	double dropped_packet_rate = 0.0; 
 	
 	portNumber = checkArgs(argc, argv);
-	// sendErr_init(.1, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
+	dropped_packet_rate = atof(argv[5]); 
+	// sendErr_init(dropped_packet_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
 
 	socketNum = setupUdpClientToServer(&server, argv[6], portNumber);
 	// addToPollSet(socketNum); 
 	// talkToServer(socketNum, &server);
 	sendFilename(socketNum, &server, argv[1], atoi(argv[4]), atoi(argv[3])); 
+	runRcopy(socketNum, &server); 
 	close(socketNum);
-
 	return 0;
 }
 
-void sendFilename(int socketNum, struct sockaddr_in6 * server, char* filename, int buffersize, int windowsize){
-	// Build the payload: "filename buffersize windowsize"
-    char payload[MAX_PACKET_SIZE - HEADER_SIZE];
-    snprintf(payload, sizeof(payload), "%s%d%d", filename, buffersize, windowsize);
-    int payload_len = strlen(payload);
+void runRcopy(int socketNum, struct sockaddr_in6 * server){
+	struct sockaddr_in6 src;
+    socklen_t srcLen = sizeof(src);
+    char buffer[MAX_PACKET_SIZE];
 
-    // Prepare the header.
-    pdu_header header;
-    header.seq = htonl(0);   // Sequence number 0 for the filename packet.
-    header.flag = 8;         // Flag value 8 indicates filename exchange.
-    header.checksum = 0;     // Initially zero for checksum calculation.
+    while (1) {
+        int dataLen = safeRecvfrom(socketNum, buffer, MAX_PACKET_SIZE, 0,
+                                   (struct sockaddr *)&src, (int *)&srcLen);
+        if (dataLen <= 0) {
+            fprintf(stderr, "Error or no data received\n");
+            continue;
+        }
 
-    // Create a fixed-size packet buffer.
-    char packet[MAX_PACKET_SIZE];
+        // ------ Recieved Data ------
+        printf("Received packet (len=%d):\n", dataLen);
+        printHexDump("", buffer, dataLen);
 
-    // Copy header into the packet (first HEADER_SIZE bytes).
-    memcpy(packet, &header, HEADER_SIZE);
-    memcpy(packet + HEADER_SIZE, payload, payload_len);
-    int packet_len = HEADER_SIZE + payload_len;
+        // Extract the PDU header.
+        pdu_header header;
+        memcpy(&header, buffer, HEADER_SIZE);
+        header.seq = ntohl(header.seq);
+        header.checksum = ntohs(header.checksum);
+        uint8_t flag = header.flag;
 
-    // Compute the checksum over the entire packet.
-    uint16_t checksum = in_cksum((unsigned short *)packet, packet_len);
-    checksum = htons(checksum);
-    memcpy(packet + 4, &checksum, sizeof(uint16_t));
+        printf("PDU Header:\n");
+        printf("  Sequence: %u\n", header.seq);
+        printf("  Checksum: 0x%04x\n", header.checksum);
+        printf("  Flag: %u\n", flag);
 
-    // Print the packet in hex.
-    printf("Packet hex dump: ");
-    for (int i = 0; i < packet_len; i++) {
-        printf("%02x ", (unsigned char)packet[i]);
+        switch(flag){
+            case 9:
+                {
+                    // Process ACK payload.
+                    int payload_len = dataLen - HEADER_SIZE;
+                    char payload[MAX_PACKET_SIZE - HEADER_SIZE + 1];
+                    if (payload_len > 0) {
+                        memcpy(payload, buffer + HEADER_SIZE, payload_len);
+                        payload[payload_len] = '\0';
+                        printf("ACK Payload: \"%s\"\n", payload);
+                        if (strcmp(payload, "Ok") == 0) {
+                            printf("Server indicates 'Ok'. Proceed with file transfer.\n");
+                            // Here, call the function that starts receiving file data.
+                        } else if (strcmp(payload, "Not Ok") == 0) {
+                            printf("Server indicates 'Not Ok'. Terminating client.\n");
+                            exit(EXIT_FAILURE);
+                        } else {
+                            printf("Unexpected ACK payload. Terminating client.\n");
+                            exit(EXIT_FAILURE);
+                        }
+                    }
+                    // Exit loop after processing ACK.
+                    return;
+                }
+                break; 
+            case 10:
+                printf("EOF / Last data Packet");
+                break; 
+            case 16:
+                printf("Regular data Packet");
+                break; 
+            default:
+                printf("Received packet with unknown flag (%d).\n", flag);
+                break; 
+
+
+        }
+
+        printf("------------------------------------------------\n");
+
+    // ------ Send SREJ or RR ------
+
+    // ------ Save Data ------
+
     }
-    printf("\n");
+}
 
-    // Send the packet using sendtoErr.
-    int serverAddrLen = sizeof(struct sockaddr_in6);
-    if (sendtoErr(socketNum, packet, packet_len, 0, (struct sockaddr *)server, serverAddrLen) < 0) {
-        perror("sendtoErr");
+void sendFilename(int socketNum, struct sockaddr_in6 * server, char* filename, int buffersize, int windowsize){
+    char payload[MAX_PACKET_SIZE - HEADER_SIZE];
+    int payload_len = 0;
+
+    uint8_t filename_len = strlen(filename);
+    if (filename_len > MAX_FILENAME) {
+        fprintf(stderr, "Filename too long. Maximum length allowed is %d characters.\n", MAX_FILENAME);
         exit(EXIT_FAILURE);
     }
-    printf("Sent filename packet: %s\n", payload);
+
+    // Packing the payload in binary format
+    payload[payload_len++] = filename_len;
+    memcpy(payload + payload_len, filename, filename_len);
+    payload_len += filename_len;
+
+    uint32_t net_bufsize = htonl(buffersize);
+    uint32_t net_windowsize = htonl(windowsize);
+
+    memcpy(payload + payload_len, &net_bufsize, sizeof(uint32_t));
+    payload_len += sizeof(uint32_t);
+
+    memcpy(payload + payload_len, &net_windowsize, sizeof(uint32_t));
+    payload_len += sizeof(uint32_t);
+
+    pdu_header header;
+    header.seq = htonl(0);
+    header.flag = 8; 
+    header.checksum = 0;
+
+    int bytesSent = sendPdu(socketNum, server, header, payload, payload_len);
+    if (bytesSent < 0) {
+        fprintf(stderr, "sendPdu failed in sendFilename\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Sent filename packet: %s\n", filename);
 }
 
-void talkToServer(int socketNum, struct sockaddr_in6 * server)
-{
-	int serverAddrLen = sizeof(struct sockaddr_in6);
-	char * ipString = NULL;
-	int dataLen = 0; 
-	char buffer[MAXBUF+1];
-	
-	buffer[0] = '\0';
-	while (buffer[0] != '.')
-	{
-		dataLen = readFromStdin(buffer);
-
-		printf("Sending: %s with len: %d\n", buffer,dataLen);
-	
-		sendtoErr(socketNum, buffer, dataLen, 0, (struct sockaddr *) server, serverAddrLen);
-		
-		safeRecvfrom(socketNum, buffer, MAXBUF, 0, (struct sockaddr *) server, &serverAddrLen);
-		
-		// print out bytes received
-		ipString = ipAddressToString(server);
-		printf("Server with ip: %s and port %d said it received %s\n", ipString, ntohs(server->sin6_port), buffer);
-	      
-	}
-}
-
-int readFromStdin(char * buffer)
-{
-	char aChar = 0;
-	int inputLen = 0;        
-	
-	// Important you don't input more characters than you have space 
-	buffer[0] = '\0';
-	printf("Enter data: ");
-	while (inputLen < (MAXBUF - 1) && aChar != '\n')
-	{
-		aChar = getchar();
-		if (aChar != '\n')
-		{
-			buffer[inputLen] = aChar;
-			inputLen++;
-		}
-	}
-	
-	// Null terminate the string
-	buffer[inputLen] = '\0';
-	inputLen++;
-	
-	return inputLen;
-}
 
 int checkArgs(int argc, char * argv[])
 {
-
 	int portNumber = 0;
 	printf("argc: %d", argc);
     
@@ -164,6 +184,20 @@ int checkArgs(int argc, char * argv[])
     if (strlen(argv[2]) >= MAX_FILENAME) {
         fprintf(stderr, "Error: to-filename '%s' is too long. Maximum allowed is %d characters.\n", argv[2], MAX_FILENAME - 1);
         exit(EXIT_FAILURE);
+    }
+
+	    // Check that the to-filename is less than MAX_FILENAME_LENGTH characters
+    if (atoi(argv[3]) > pow(2,30)) {
+        fprintf(stderr, "Error: window-size '%s' is too large. Max allowed is 2 ^ 30.\n", argv[3]);
+        exit(EXIT_FAILURE);
+    }
+	
+	double errorRate = 0.0; 
+    errorRate = atof(argv[5]); 
+    if(errorRate < 0 || errorRate > 1)
+    {
+        fprintf(stderr, "Error: %s <error-rate> must be between 0.0 and 1.0\n", argv[5]); 
+        exit(EXIT_FAILURE); 
     }
     
     portNumber = atoi(argv[7]);

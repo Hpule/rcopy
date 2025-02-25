@@ -1,0 +1,11 @@
+Medium2 Test File
+
+This is a medium-sized text file designed to test the file copy program.
+It contains multiple lines of text to simulate a realistic file.
+Each line is distinct and the overall file size spans several hundred bytes.
+
+The purpose of this file is to ensure that the file is segmented into multiple packets.
+Even though the file is not very large, it may require more than one network packet
+depending on the buffer size you specify.
+
+End of Medium2 file.

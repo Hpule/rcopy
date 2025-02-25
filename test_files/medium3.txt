@@ -1,0 +1,12 @@
+Medium3 Test File
+
+The quick brown fox jumps over the lazy dog.
+Pack my box with five dozen liquor jugs.
+How razorback-jumping frogs can level six piqued gymnasts!
+The rain in Spain stays mainly in the plain.
+
+This file contains a mixture of common pangrams and sample sentences.
+It is used to further test the functionality of the remote file copy program.
+Make sure the file copy handles all the text correctly and completely.
+
+Thank you for using this test file.
