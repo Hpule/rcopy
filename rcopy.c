@@ -28,6 +28,12 @@ void sendFilename(int socketNum, struct sockaddr_in6 * server, char* filename, i
 void runRcopy(int socketNum, struct sockaddr_in6 * server); 
 void processACK(); 
 void processPacket(); 
+void processEOF(); 
+
+// ----- Global Variables -----
+int attempts = 0; 
+bool ackReceived = false;
+
 
 int main (int argc, char *argv[])
  {
@@ -53,7 +59,8 @@ void runRcopy(int socketNum, struct sockaddr_in6 * server){
 	struct sockaddr_in6 src;
     socklen_t srcLen = sizeof(src);
     char buffer[MAX_PACKET_SIZE];
-
+    
+    // ----- Data Recieved -----
     while (1) {
         int dataLen = safeRecvfrom(socketNum, buffer, MAX_PACKET_SIZE, 0,
                                    (struct sockaddr *)&src, (int *)&srcLen);
@@ -121,6 +128,10 @@ void runRcopy(int socketNum, struct sockaddr_in6 * server){
     // ------ Send SREJ or RR ------
 
     // ------ Save Data ------
+
+    }
+
+    if(!ackReceived){
 
     }
 }
@@ -203,8 +214,3 @@ int checkArgs(int argc, char * argv[])
     portNumber = atoi(argv[7]);
     return portNumber;
 }
-
-
-
-
-

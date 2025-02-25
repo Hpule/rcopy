@@ -90,11 +90,6 @@ void processClient(int socketNum, int dataLen, char * buffer, struct sockaddr_in
         uint8_t *p = (uint8_t *)(buffer + sizeof(pdu_header));
 
         if (flag == 8) {
-            // Expected binary format for a filename packet:
-            // Byte 0: filename length (name_len)
-            // Bytes 1 to name_len: filename (not null-terminated)
-            // Next 4 bytes: buffer size (uint32_t, network order)
-            // Next 4 bytes: window size (uint32_t, network order)
             if (payload_len < 1 + 4 + 4) {
                 fprintf(stderr, "Payload too short for a filename packet\n");
             } else {

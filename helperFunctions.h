@@ -17,6 +17,7 @@ typedef struct __attribute__((packed)) {
 #define MAXBUF 1400
 #define MAX_FILENAME 100
 #define TIMEOUT 1000
+#define MAX_ATTEMPTS 10
 
 // Print a hex dump of a buffer.
 void printHexDump(const char *label, const char *buffer, int len);
