@@ -39,23 +39,25 @@ typedef struct {
     char *remoteMachine;
     int attempts;
     bool ackReceived;
+    bool eof; 
 } RcopyContext;
 
 // ----- Other stuctures ----- 
 // Circular Buffer = new circular buffer 
 
 // ----- FSM Functions -----
-rcopy_state_t stateInit(RcopyContext *ctx);
-rcopy_state_t stateHandshake(RcopyContext *ctx);
-rcopy_state_t stateFileReceive(RcopyContext *ctx);
-rcopy_state_t stateRetry(RcopyContext *ctx);
+rcopy_state_t stateInit(RcopyContext *rcopy);
+rcopy_state_t stateHandshake(RcopyContext *rcopy);
+rcopy_state_t stateFileReceive(RcopyContext *rcopy);
+rcopy_state_t stateRetry(RcopyContext *rcopy);
 
 // ----- Rcopy Functions  -----
-void runRcopyFSM(RcopyContext *ctx);
-void cleanup(RcopyContext *ctx);
+void runRcopyFSM(RcopyContext *rcopy);
+void cleanup(RcopyContext *rcopy);
 void sendFilename(int socketNum, struct sockaddr_in6 *server, char* filename, int buffersize, int windowsize);
-void sendRR(); 
-void sendSREJ(); 
+void sendRR(int RR); 
+void sendSREJ(int RR); 
+void sendEOF(); 
 int checkArgs(int argc, char * argv[]);
 
 
@@ -78,26 +80,26 @@ int main(int argc, char *argv[])
 }
 
 // ----- FSM Loop -----
-void runRcopyFSM(RcopyContext *ctx)
+void runRcopyFSM(RcopyContext *rcopy)
 {
     rcopy_state_t state = STATE_INIT;
 
     while (state != STATE_DONE) {
         switch (state) {
             case STATE_INIT:
-                state = stateInit(ctx);
+                state = stateInit(rcopy);
                 break;
 
             case STATE_HANDSHAKE:
-                state = stateHandshake(ctx);
+                state = stateHandshake(rcopy);
                 return;
 
             case STATE_FILE_RECEIVE:
-                state = stateFileReceive(ctx);
+                state = stateFileReceive(rcopy);
                 return;
                 
             case STATE_RETRY:
-                state = stateRetry(ctx);
+                state = stateRetry(rcopy);
                 break;
 
             default:
@@ -106,16 +108,8 @@ void runRcopyFSM(RcopyContext *ctx)
         }
     }
 
-    cleanup(ctx);
+    cleanup(rcopy);
 }
-
-
-rcopy_state_t stateFileReceive(RcopyContext *ctx){
-    // open output File 
-    // if Open fails print error and go to done 
-
-    int RR = 0; 
-    int SREJ = 0; 
 
     // Array Buffer 
 
@@ -140,12 +134,77 @@ rcopy_state_t stateFileReceive(RcopyContext *ctx){
     // If we get duplicate data 
     //      send Ack
     //      poll for 10 secs
-
+rcopy_state_t stateFileReceive(RcopyContext *rcopy){
+    struct sockaddr_in6 src; 
+    socklen_t srcLen = sizeof(src);
+    char dataPacket[MAXBUF]; 
+    uint32_t RR = 0; 
+    int SREJ = -1; 
     
-    return STATE_DONE; 
+    FILE *outputFile = fopen(rcopy->rcopy_filename, "wb");
+    if(!outputFile){
+        perror("Error opening file for writing");
+        return STATE_DONE;    
+    } 
+    init_window_buffer(rcopy->windowsize); 
+
+    while(rcopy->attempts < MAX_ATTEMPTS){
+        int dataLen = safeRecvfrom(rcopy->socketNum, dataPacket, MAX_PACKET_SIZE, 0, (struct sockaddr*)&src, (int *)&srcLen); 
+        
+        if(dataLen <= 0) {fprintf(stderr, "Error or no data received\n"); continue;}
+        if(in_cksum((uint16_t*)dataPacket, dataLen)) {fprintf(stderr, "Checksum Error\n"); sendSREJ(RR); continue;}
+
+        pdu_header header; 
+        memcpy(&header, dataPacket, HEADER_SIZE); 
+        uint32_t seq = ntohl(header.seq);
+        
+        switch(header.flag){
+            case 10: // EOF
+                printf("EOF received. Sending EOF ACK.\n");
+                sendEOF(); 
+                fclose(outputFile);
+                destroy_window_buffer(); 
+                return STATE_DONE; 
+            case 16: // Data Packet
+                if(seq == RR){ // Good data
+                    fwrite(dataPacket + HEADER_SIZE, 1, dataLen - HEADER_SIZE, outputFile);
+                    fflush(outputFile); 
+                    RR++; 
+                    flush_buffer(outputFile, &RR); 
+                    sendRR(RR); 
+                }else if (seq > RR) // A packet is lost and get other data
+                {
+                    buffer_packet(seq,(uint8_t *) (dataPacket + HEADER_SIZE), dataLen - HEADER_SIZE); 
+                    sendSREJ(RR); 
+                }
+                else{ // duplicate data 
+                    sendRR(RR); 
+                }
+                break; 
+            default:
+                break; 
+        }
+    }
+
+    destroy_window_buffer(); 
+    fclose(outputFile);
+    return STATE_DONE;  
 }
 
-rcopy_state_t stateRetry(RcopyContext *ctx){
+
+void sendRR(int RR){
+
+} 
+
+void sendSREJ(int RR){
+
+}
+
+void sendEOF(){
+
+}
+
+rcopy_state_t stateRetry(RcopyContext *rcopy){
     return STATE_DONE; 
 }
 
@@ -176,10 +235,8 @@ rcopy_state_t stateHandshake(RcopyContext *rcopy)
         sendFilename(rcopy->socketNum, &rcopy->server, rcopy->server_filename, rcopy->buffersize, rcopy->windowsize);
         printf("Handshake attempt %d...\n", rcopy->attempts + 1);
 
-        // Wait for a response.
-        if (pollCall(POLL_ONE_SEC) >= 0) {
-            int dataLen = safeRecvfrom(rcopy->socketNum, buffer, MAX_PACKET_SIZE, 0,
-                                       (struct sockaddr *)&src, (int *)&srcLen);
+         if (pollCall(POLL_ONE_SEC) >= 0) {
+            int dataLen = safeRecvfrom(rcopy->socketNum, buffer, MAX_PACKET_SIZE, 0, (struct sockaddr *)&src, (int *)&srcLen);
             if (dataLen > 0) {
                 // Read header from received data.
                 pdu_header header;
@@ -189,23 +246,16 @@ rcopy_state_t stateHandshake(RcopyContext *rcopy)
                     case 9:  // ACK flag
                         printf("Received ACK from server.\n");
 
-                        // Extract payload if available.
                         int payload_len = dataLen - HEADER_SIZE;
                         char ackPayload[MAX_PACKET_SIZE - HEADER_SIZE + 1] = {0};
-
                         if (payload_len > 0) {
                             memcpy(ackPayload, buffer + HEADER_SIZE, payload_len);
                             ackPayload[payload_len] = '\0';
                             printf("ACK Payload: \"%s\"\n", ackPayload);
                         }
 
-                        if (strcmp(ackPayload, "Ok") == 0) {
-                            printf("Handshake successful! Proceeding to file reception.\n");
-                            return STATE_FILE_RECEIVE;
-                        } else {
-                            printf("Server responded with 'Not Ok'. Terminating.\n");
-                            return STATE_DONE;
-                        }
+                        if (strcmp(ackPayload, "Ok") == 0) { printf("Handshake successful! Proceeding to file reception.\n"); return STATE_FILE_RECEIVE;} 
+                        else { printf("Server responded with 'Not Ok'. Terminating.\n"); return STATE_DONE;}
 
                     default:
                         printf("Unexpected packet (flag=%d) received. Ignoring.\n", header.flag);
@@ -254,7 +304,7 @@ void sendFilename(int socketNum, struct sockaddr_in6 *server, char* filename, in
     
     int bytesSent = sendPdu(socketNum, server, header, pdu, pduLen);
     if (bytesSent < 0) {
-        fprintf(stderr, "sendPdu failed in sendFilename\n");
+        fprintf(stderr, "sendPdu failed in sendFilename\n"); 
         exit(EXIT_FAILURE);
     }
     printf("Sent filename packet: %s\n", filename);
