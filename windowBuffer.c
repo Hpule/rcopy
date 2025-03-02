@@ -3,119 +3,105 @@
 #include <string.h>
 #include <stdio.h>
 
-WindowBuffer *wb_create(int capacity) {
-    WindowBuffer *wb = (WindowBuffer *)malloc(sizeof(WindowBuffer));
-    if (!wb) {
-        perror("Failed to allocate memory for WindowBuffer");
-        return NULL;
-    }
-    wb->buffer = (Packet *)malloc(capacity * sizeof(Packet));
-    if (!wb->buffer) {
-        perror("Failed to allocate memory for packet array");
-        free(wb);
-        return NULL;
-    }
-    wb->size = capacity;
-    wb->count = 0;
-    // Initialize all slots as empty.
-    for (int i = 0; i < capacity; i++) {
-        wb->buffer[i].seq_num = 0;
-        wb->buffer[i].len = 0;
-        wb->buffer[i].acked = false;
-        memset(wb->buffer[i].data, 0, sizeof(wb->buffer[i].data));
-    }
-    return wb;
-}
+// ---- Global Buffer ----
+static window_buffer_t buffer;
 
-void wb_destroy(WindowBuffer *wb) {
-    if (wb) {
-        free(wb->buffer);
-        free(wb);
+// ---- Initialize Circular Buffer ----
+void init_window_buffer(int window_size) {
+    buffer.entries = (buffer_entry_t *)malloc(window_size * sizeof(buffer_entry_t));
+    if (!buffer.entries) {
+        fprintf(stderr, "Error: Memory allocation failed for window buffer\n");
+        exit(EXIT_FAILURE);
+    }
+    buffer.window_size = window_size;
+    buffer.lower = 0;
+    buffer.upper = window_size;
+    buffer.current = 0;
+
+    // Initialize all buffer slots as invalid
+    for (int i = 0; i < window_size; i++) {
+        buffer.entries[i].valid = false;
     }
 }
 
-bool wb_isFull(WindowBuffer *wb) {
-    return (wb->count == wb->size);
-}
-
-bool wb_isEmpty(WindowBuffer *wb) {
-    return (wb->count == 0);
-}
-
-// Inserts a packet at index = (seq_num % size). Overwrites any existing data there.
-bool wb_insert(WindowBuffer *wb, uint32_t seq_num, const char *data, int data_len) {
-    if (!wb || !data || data_len < 0)
-        return false;
-    int index = seq_num % wb->size;
-    wb->buffer[index].seq_num = seq_num;
-    wb->buffer[index].len = data_len;
-    memcpy(wb->buffer[index].data, data, data_len);
-    // Zero out any remaining bytes (optional).
-    if (data_len < (int)sizeof(wb->buffer[index].data))
-        memset(wb->buffer[index].data + data_len, 0, sizeof(wb->buffer[index].data) - data_len);
-    wb->buffer[index].acked = false;
-    // If this slot was previously empty (len==0), increment count.
-    if (wb->buffer[index].len == data_len)
-        ; // We assume overwriting is allowed; for a more robust implementation, 
-          // you might want to check if the slot was valid before.
-    if (wb->count < wb->size)
-        wb->count++;
-    return true;
-}
-
-// Retrieves a packet at index = (seq_num % size) if it exists (len > 0).
-bool wb_get(WindowBuffer *wb, uint32_t seq_num, Packet *packet) {
-    if (!wb || !packet)
-        return false;
-    int index = seq_num % wb->size;
-    if (wb->buffer[index].len > 0) {
-        *packet = wb->buffer[index];
-        return true;
+// ---- Free Buffer Memory ----
+void destroy_window_buffer() {
+    if (buffer.entries) {
+        free(buffer.entries);
+        buffer.entries = NULL;
     }
-    return false;
 }
 
-// Removes (invalidates) a packet at index = (seq_num % size).
-bool wb_remove(WindowBuffer *wb, uint32_t seq_num) {
-    if (!wb)
-        return false;
-    int index = seq_num % wb->size;
-    if (wb->buffer[index].len > 0) {
-        wb->buffer[index].len = 0;
-        wb->buffer[index].acked = false;
-        wb->buffer[index].seq_num = 0;
-        wb->count--;
-        return true;
-    }
-    return false;
-}
+// ---- Buffer a Packet ----
+void buffer_packet(uint32_t seq, uint8_t *data, int length) {
+    int index = seq % buffer.window_size;
 
-// Marks a packet as acknowledged.
-bool wb_markAcked(WindowBuffer *wb, uint32_t seq_num) {
-    if (!wb)
-        return false;
-    int index = seq_num % wb->size;
-    if (wb->buffer[index].len > 0) {
-        wb->buffer[index].acked = true;
-        return true;
-    }
-    return false;
-}
-
-void wb_print(WindowBuffer *wb) {
-    if (!wb)
+    if (buffer.entries[index].valid && buffer.entries[index].sequence_num != seq) {
+        fprintf(stderr, "Error: Buffer Overflow - SEQ %d is overwriting an unprocessed packet at index %d\n",
+                seq, index);
         return;
-    printf("WindowBuffer (capacity: %d, count: %d):\n", wb->size, wb->count);
-    for (int i = 0; i < wb->size; i++) {
-        printf("Index %d: ", i);
-        if (wb->buffer[i].len > 0) {
-            printf("Seq: %u, Len: %d, Acked: %d, Data: \"%s\"\n",
-                   wb->buffer[i].seq_num,
-                   wb->buffer[i].len,
-                   wb->buffer[i].acked ? 1 : 0,
-                   wb->buffer[i].data);
-        } else {
-            printf("<empty>\n");
+    }
+
+    memcpy(buffer.entries[index].data, data, length);
+    buffer.entries[index].sequence_num = seq;
+    buffer.entries[index].valid = true;
+    buffer.entries[index].length = length;
+
+    printf("Buffered SEQ=%d at index=%d\n", seq, index);
+}
+
+// ---- Flush Buffered Packets to File ----
+void flush_buffer(FILE *outputFile, uint32_t *RR) {
+    int index = *RR % buffer.window_size;
+
+    while (buffer.entries[index].valid) {
+        printf("Flushing SEQ=%d to file (index=%d)\n", buffer.entries[index].sequence_num, index);
+
+        fwrite(buffer.entries[index].data, 1, buffer.entries[index].length, outputFile);
+        fflush(outputFile);
+
+        buffer.entries[index].valid = false;  // Mark slot as empty
+        (*RR)++;
+        index = *RR % buffer.window_size;
+    }
+}
+
+// ---- Invalidate ACKed Packets ----
+void invalidate_packets(uint32_t RR) {
+    for (int i = 0; i < buffer.window_size; i++) {
+        if (buffer.entries[i].valid && buffer.entries[i].sequence_num < RR) {
+            buffer.entries[i].valid = false;
         }
     }
+}
+
+// ---- Check If Window is Full (for Sender) ----
+bool is_window_full() {
+    return buffer.current >= buffer.upper;
+}
+
+// ---- Get Lowest Unacknowledged SEQ (for Sender) ----
+uint32_t get_lowest_unack_seq() {
+    return buffer.lower;
+}
+
+// ---- Print Window Buffer (For Debugging) ----
+void print_window_buffer() {
+    if (buffer.entries == NULL) {
+        printf("Window Buffer Empty\n");
+        return;
+    }
+
+    printf("\n========= WINDOW BUFFER STATE =========\n");
+    printf("Window Size: %d | Lower: %d | Upper: %d | Current: %d\n",
+           buffer.window_size, buffer.lower, buffer.upper, buffer.current);
+
+    for (int i = 0; i < buffer.window_size; i++) {
+        if (buffer.entries[i].valid) {
+            printf("[Index %d] SEQ=%d | VALID\n", i, buffer.entries[i].sequence_num);
+        } else {
+            printf("[Index %d] EMPTY\n", i);
+        }
+    }
+    printf("=======================================\n\n");
 }

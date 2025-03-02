@@ -1,58 +1,52 @@
 #ifndef WINDOW_BUFFER_H
 #define WINDOW_BUFFER_H
 
-#include <stdbool.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include "helperFunctions.h"
 
-// Define the Packet structure.
-// Adjust the data field size as needed; here we use 1408 bytes to allow for up to 1407 bytes of data.
+// Data structure for a buffered packet
 typedef struct {
-    uint32_t seq_num;   // Packet sequence number.
-    int len;            // Length of valid data.
-    char data[1408];    // Data buffer.
-    bool acked;         // True if the packet has been acknowledged.
-} Packet;
+    uint8_t data[MAXBUF];
+    uint32_t sequence_num;
+    bool valid;
+    int length;
+} buffer_entry_t;
 
-// Define the WindowBuffer structure.
+// Circular Buffer Structure
 typedef struct {
-    Packet *buffer;     // Dynamically allocated array of Packet structures.
-    int size;           // Capacity of the window (window size).
-    int count;          // Current number of packets stored.
-    // Note: We do not expose head/tail directly outside this library.
-} WindowBuffer;
+    buffer_entry_t *entries;  // Dynamic array of buffer entries
+    int window_size;
+    int lower;   // Lowest unacknowledged packet
+    int upper;   // Highest allowed in window
+    int current; // Current sequence number
+} window_buffer_t;
 
-// API function prototypes:
+// ---- Function Prototypes ----
 
-// Create and initialize a window buffer with the given capacity.
-WindowBuffer *wb_create(int capacity);
+// Initialize the buffer (malloc'd array of `window_size`)
+void init_window_buffer(int window_size);
 
-// Free the window buffer.
-void wb_destroy(WindowBuffer *wb);
+// Destroy the buffer (free allocated memory)
+void destroy_window_buffer();
 
-// Returns true if the buffer is full.
-bool wb_isFull(WindowBuffer *wb);
+// Add a packet to the buffer (for out-of-order storage)
+void buffer_packet(uint32_t seq, uint8_t *data, int length);
 
-// Returns true if the buffer is empty.
-bool wb_isEmpty(WindowBuffer *wb);
+// Flush the buffer when `RR` is incremented
+void flush_buffer(FILE *outputFile, uint32_t *RR);
 
-// Inserts a packet into the buffer at index = (seq_num % capacity).
-// This overwrites any existing packet at that index.
-// Returns true on success.
-bool wb_insert(WindowBuffer *wb, uint32_t seq_num, const char *data, int data_len);
+// Invalidate packets that are ACKed
+void invalidate_packets(uint32_t RR);
 
-// Retrieves (peeks) a packet from the buffer by sequence number (using seq_num % capacity).
-// Returns true if the packet exists and is valid.
-bool wb_get(WindowBuffer *wb, uint32_t seq_num, Packet *packet);
+// Check if window is full (for sender)
+bool is_window_full();
 
-// Removes (invalidates) a packet from the buffer by sequence number.
-// Returns true if a packet was removed.
-bool wb_remove(WindowBuffer *wb, uint32_t seq_num);
+// Get the current lowest unacknowledged SEQ (for sender)
+uint32_t get_lowest_unack_seq();
 
-// Marks the packet at index (seq_num % capacity) as acknowledged.
-// Returns true if successful.
-bool wb_markAcked(WindowBuffer *wb, uint32_t seq_num);
+// Print window buffer state (debugging)
+void print_window_buffer();
 
-// For debugging: prints the contents of the window buffer.
-void wb_print(WindowBuffer *wb);
-
-#endif // WINDOW_BUFFER_H
+#endif  // WINDOW_BUFFER_H

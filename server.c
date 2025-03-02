@@ -18,128 +18,236 @@
 #include "windowBuffer.h"
 #include "helperFunctions.h"
 
-void runServer(int socket); 
-void processClient(int socketNum, int dataLen, char * buffer, struct sockaddr_in6 *client, socklen_t clientAddrLen); 
+// ----- Server FSM States ----- 
+typedef enum {
+    STATE_WAIT_PACKET,
+    STATE_PROCESS_FILENAME,
+    STATE_TRANSFER_TO_CHILD,
+    STATE_DONE
+} server_state_t;
+
+// ----- Rcopy Context Structure ----- 
+typedef struct {
+    int portNum; 
+    int socketNum; 
+    double error_rate; 
+    struct sockaddr_in6 client; 
+    socklen_t clientAddrLen; 
+    char filename[MAX_FILENAME + 1];
+    uint32_t winSize;
+    uint32_t bufSize;
+} ServerContext;
+
+// ----- Other stuctures ----- 
+
+// ----- FSM Declarations -----
+
+
+// ----- Sever Functions -----
+void runServerFSM(ServerContext *server);
+void processFilenamePacket(int socketNum, int payload_len, uint8_t *p, struct sockaddr_in6 *client);
 int  checkArgs(int argc, char *argv[]);
+int processClient(ServerContext *ctx, int dataLen, char *buffer); 
 bool lookupFilename(const char *filename); 
+
+// ----- Child Functions ----- 
+void runChild(); 
+
 
 int main ( int argc, char *argv[]  )
 { 
-    int socketNum = 0;				
-    int portNumber = 0;
-	double dropped_packet_rate = 0.0;  
+    ServerContext server; 
+    memset(&server, 0, sizeof(ServerContext)); // Fixed sizeof issue
+    server.portNum = checkArgs(argc, argv);
+    server.socketNum = udpServerSetup(server.portNum);  
+    server.error_rate = atof(argv[1]); 
+    setupPollSet(); 
 
-    portNumber = checkArgs(argc, argv);
-    socketNum = udpServerSetup(portNumber);
-	dropped_packet_rate = atof(argv[1]); 
-    // sendErr_init(dropped_packet_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
 
-    runServer(socketNum); 
+    runServerFSM(&server); 
+    close(server.socketNum); 
 
-    close(socketNum);
-    
-    return 0;
+    // int socketNum = 0;				
+    // int portNumber = 0;
+	// double dropped_packet_rate = 0.0;  
+
+    // portNumber = checkArgs(argc, argv);
+    // socketNum = udpServerSetup(portNumber);
+	// dropped_packet_rate = atof(argv[1]); 
+    // // sendErr_init(dropped_packet_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
+
+    // setupPollSet(); 
+    // runServer(socketNum); 
+    // close(socketNum);
+    // return 0;
 }
 
-void runServer(int socketNum){
-    struct sockaddr_in6 client;
-    socklen_t clientAddrLen = sizeof(client);
-    char buffer[MAXBUF + 1];
+
+void runServerFSM(ServerContext *server){
+    server_state_t state = STATE_WAIT_PACKET; 
+    char buffer[MAXBUF + 1]; 
+    int dataLen; 
 
     while(1){
-        // Wait for an incoming packet (e.g., a filename or file data packet)
-        int dataLen = recvfrom(socketNum, buffer, MAXBUF, 0,
-            (struct sockaddr *)&client, &clientAddrLen);
+        switch(state){
+            case STATE_WAIT_PACKET:
+                printf("SERVER: Waiting for incoming packets...\n");
+                server->clientAddrLen = sizeof(server->client); 
 
-        if (dataLen < (int)sizeof(pdu_header)) {
-            fprintf(stderr, "Received packet too short (%d bytes).\n", dataLen);
-            continue;
+                dataLen = safeRecvfrom(server->socketNum, buffer, MAXBUF, 0,
+                                (struct sockaddr *)&server->client, (int *)(&server->clientAddrLen));
+
+                if (dataLen >= (int)sizeof(pdu_header)) {
+                    state = STATE_PROCESS_FILENAME;
+                }
+                break;
+            case STATE_PROCESS_FILENAME:
+                printf("SERVER: Processing filename packet...\n");
+
+                if (processClient(server, dataLen, buffer) == 0) {
+                    state = STATE_TRANSFER_TO_CHILD;
+                } else {
+                    printf("SERVER: File not found. Returning to waiting state.\n");
+                    state = STATE_WAIT_PACKET;
+                }
+                break;
+            case STATE_TRANSFER_TO_CHILD:
+                printf("SERVER: Forking child process for file transfer...\n");
+                pid_t child = fork(); 
+                if(child < 0){
+                    perror("fork"); 
+                } else if (child == 0){
+                    runChild(0); 
+                    exit(0); 
+                }
+
+                state = STATE_WAIT_PACKET;  // Keep listening for new clients
+
+                break; 
+            default:
+                printf("SERVER: Unexpected state reached. Returning to wait state.\n");
+                state = STATE_WAIT_PACKET; 
+                break;              
+
         }
-
-		pid_t pid = fork(); 
-		if(pid < 0){
-			perror("fork"); 
-		}
-		else if(pid == 0){
-			processClient(socketNum, dataLen, buffer, &client, clientAddrLen);
-			exit(0); 
-		}
     }
 }
 
-void processClient(int socketNum, int dataLen, char * buffer, struct sockaddr_in6 *client, socklen_t clientAddrLen){
-    // Print hex dump of the received packet.
+// void runServer(int socketNum){
+//     struct sockaddr_in6 client;
+//     socklen_t clientAddrLen = sizeof(client);
+//     char buffer[MAXBUF + 1];
+
+//     while (1) {
+//         int dataLen = recvfrom(socketNum, buffer, MAXBUF, 0, (struct sockaddr *)&client, &clientAddrLen);
+        
+//         if (dataLen < (int)sizeof(pdu_header)) {
+//             fprintf(stderr, "Received packet too short (%d bytes).\n", dataLen);
+//             continue;
+//         }
+
+//         // ----- ProcessClient in server
+//         if(processClient(socketNum, dataLen, buffer, &client, clientAddrLen) == 0){
+//             pid_t child = fork(); 
+//             if(child < 0){
+//                 perror("fork"); 
+//             } else if (child == 0){
+//                 runChild(0); 
+//             }
+//         }
+//     }
+// }
+
+void runChild(int attempts){
+    // Going to have a double while loop
+
+    // bool windowOpen = true; 
+    // bool eof = false; 
+    // int child_attempts = attempts; 
+
+    // Open file and initilze circular buffer
+
+    // while(!eof){
+        // if attempts > 10, close 
+        // while(windowOpen){
+            // if attempts > 10, close 
+            // Read from disk
+            // send data 
+            // while(poll(0) == true)
+            //      process RR / SREJ
+        // }
+        // while(!windowOpen){
+            // if attempts > 10, close 
+            // while(poll(1000))
+            //   resend lowest pdu
+            //      child_attempts++
+            // else 
+            //      process RR / SREJ
+        // }
+    // }
+}
+
+int processClient(ServerContext *ctx, int dataLen, char *buffer)
+{
     printf("Received packet (len=%d):\n", dataLen);
     printHexDump("", buffer, dataLen);
 
-    // Extract the PDU header.
+    // Validate checksum before processing packet
+    if (in_cksum((uint16_t *)buffer, dataLen) != 0) {
+        fprintf(stderr, "Corrupt packet detected. Discarding.\n");
+        return -1;  // Ignore corrupted packets
+    }
+    // Extract header and flag
     pdu_header header;
     memcpy(&header, buffer, sizeof(pdu_header));
-    uint32_t seq = ntohl(header.seq);
-    uint16_t chksum = ntohs(header.checksum);
     uint8_t flag = header.flag;
-    printf("PDU Header:\n");
-    printf("  Sequence: %u\n", seq);
-    printf("  Checksum: 0x%04x\n", chksum);
-    printf("  Flag: %u\n", flag);
 
-    // Calculate payload length.
-    int payload_len = dataLen - sizeof(pdu_header);
-    if (payload_len > 0) {
-        // Treat payload as a byte array.
-        uint8_t *p = (uint8_t *)(buffer + sizeof(pdu_header));
+    // Process filename packet
+    if (flag == 8) {
+        if (dataLen < (int)(sizeof(pdu_header) + 9)) {
+            fprintf(stderr, "Payload too short for filename packet\n");
+            return -1;
+        }
 
-        if (flag == 8) {
-            if (payload_len < 1 + 4 + 4) {
-                fprintf(stderr, "Payload too short for a filename packet\n");
-            } else {
-                uint8_t name_len = p[0];
-                if (payload_len < 1 + name_len + 4 + 4) {
-                    fprintf(stderr, "Payload too short for filename and sizes\n");
-                } else {
-                    char filename[MAX_FILENAME + 1];
-                    if (name_len > MAX_FILENAME)
-                        name_len = MAX_FILENAME;
-                    memcpy(filename, p + 1, name_len);
-                    filename[name_len] = '\0';
+        // Extract window and buffer sizes
+        memcpy(&ctx->winSize, buffer + sizeof(pdu_header), sizeof(uint32_t));
+        memcpy(&ctx->bufSize, buffer + sizeof(pdu_header) + sizeof(uint32_t), sizeof(uint32_t));
+        ctx->winSize = ntohl(ctx->winSize);
+        ctx->bufSize = ntohl(ctx->bufSize);
 
-                    uint32_t bufSize = 0, winSize = 0;
-                    memcpy(&bufSize, p + 1 + name_len, 4);
-                    memcpy(&winSize, p + 1 + name_len + 4, 4);
-                    bufSize = ntohl(bufSize);
-                    winSize = ntohl(winSize);
+        // Extract filename
+        uint8_t name_len = buffer[sizeof(pdu_header) + 8];
+        if (dataLen < (int)(sizeof(pdu_header) + 9 + name_len)) {
+            fprintf(stderr, "Payload too short for filename and sizes\n");
+            return -1;
+        }
+        memcpy(ctx->filename, buffer + sizeof(pdu_header) + 9, name_len);
+        ctx->filename[name_len] = '\0';
 
-                    printf("Parsed Filename: %s\n", filename);
-                    printf("  Buffer size: %u\n", bufSize);
-                    printf("  Window size: %u\n", winSize);
+        printf("Parsed Filename: %s\n  Window: %u, Buffer: %u\n", ctx->filename, ctx->winSize, ctx->bufSize);
 
-                    // Lookup the file (searches in "test_files" directory).
-                    bool fileFound = lookupFilename(filename);
-                    
-                    // Prepare ACK header.
-                    pdu_header ack;
-                    ack.seq = htonl(0);   // You might update this with the proper sequence.
-                    ack.flag = 9;         // Flag 9 indicates ACK.
-                    ack.checksum = 0;     // Checksum will be computed in sendPdu.
-                    
-                    if (fileFound) {
-                        const char *okStr = "Ok";
-                        sendPdu(socketNum, client, ack, okStr, strlen(okStr));
-                    } else {
-                        const char *notOkStr = "Not Ok";
-                        sendPdu(socketNum, client, ack, notOkStr, strlen(notOkStr));
-                    }
-                }
+        // Prepare ACK header
+        pdu_header ack;
+        ack.seq = htonl(0);
+        ack.flag = 9;
+        ack.checksum = 0;
+
+        // Ensure client address is passed correctly
+        if (lookupFilename(ctx->filename)) {
+            if (sendPdu(ctx->socketNum, &ctx->client, ack, "Ok", strlen("Ok")) < 0) {
+                fprintf(stderr, "ERROR: Failed to send ACK\n");
+                return -1;
             }
+            return 0;  // File exists, proceed with file transfer
         } else {
-            // For non-filename packets, treat payload as a text string.
-            char text_payload[MAXBUF - sizeof(pdu_header) + 1];
-            memcpy(text_payload, buffer + sizeof(pdu_header), payload_len);
-            text_payload[payload_len] = '\0';
-            printf("Payload: \"%s\"\n", text_payload);
+            if (sendPdu(ctx->socketNum, &ctx->client, ack, "Not Ok", strlen("Not Ok")) < 0) {
+                fprintf(stderr, "ERROR: Failed to send negative ACK\n");
+            }
+            return -1;
         }
     }
-    printf("--------------------------------------------------\n");
+
+    return -1;
 }
 
 bool lookupFilename(const char *filename) {

@@ -29,6 +29,12 @@ int sendPdu(int sock, struct sockaddr_in6 *dest, pdu_header header, const char *
         return -1;	
     }
     
+    // Ensure destination address is valid
+    if (dest == NULL) {
+        fprintf(stderr, "Error: Invalid destination address in sendPdu()\n");
+        return -1;
+    }
+    
     // Create a local copy of the header.
     pdu_header temp_header = header;
     
