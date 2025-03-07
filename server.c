@@ -26,7 +26,7 @@ typedef enum {
     STATE_DONE
 } server_state_t;
 
-// ----- Rcopy Context Structure ----- 
+// ----- Server Context Structure ----- 
 typedef struct {
     int portNum; 
     int socketNum; 
@@ -38,9 +38,18 @@ typedef struct {
     uint32_t bufSize;
 } ServerContext;
 
-// ----- Other stuctures ----- 
-
-// ----- FSM Declarations -----
+typedef struct{
+    int socketNum; 
+    double error_rate; 
+    struct sockaddr_in6 client; 
+    socklen_t clientAddrLen; 
+    char filename[MAX_FILENAME + 1];
+    uint32_t winSize; 
+    uint32_t bufSize; 
+    bool eof; 
+    bool srej;    
+    int attempts; 
+} ChildContent; 
 
 
 // ----- Sever Functions -----
@@ -51,8 +60,10 @@ int processClient(ServerContext *server, int dataLen, char *buffer);
 bool lookupFilename(const char *filename); 
 
 // ----- Child Functions ----- 
-void runChild(); 
-
+void runChild(ChildContent *child); 
+void transmitData(ChildContent *child, FILE *file); 
+void processRR(); 
+void processSREJ(); 
 
 int main ( int argc, char *argv[]  )
 { 
@@ -62,7 +73,7 @@ int main ( int argc, char *argv[]  )
     server.socketNum = udpServerSetup(server.portNum);  
     server.error_rate = atof(argv[1]); 
     setupPollSet(); 
-    // sendErr_init(server.error_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
+    sendErr_init(server.error_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
 
     runServerFSM(&server); 
     close(server.socketNum); 
@@ -73,16 +84,17 @@ int main ( int argc, char *argv[]  )
 
 void runServerFSM(ServerContext *server){
     server_state_t state = STATE_WAIT_PACKET; 
-    char buffer[MAXBUF + 1]; 
+    char buffer[MAX_PDU_SIZE + 1]; 
     int dataLen; 
 
     while(1){
         switch(state){
             case STATE_WAIT_PACKET:
-                printf("SERVER: Waiting for incoming packets...\n");
+                printf("----- FSM: STATE_WAIT_PACKET -----\n");
                 server->clientAddrLen = sizeof(server->client); 
 
-                dataLen = safeRecvfrom(server->socketNum, buffer, MAXBUF, 0,
+
+                dataLen = safeRecvfrom(server->socketNum, buffer, MAX_PDU_SIZE, 0,
                                 (struct sockaddr *)&server->client, (int *)(&server->clientAddrLen));
 
                 if (dataLen >= (int)sizeof(pdu_header)) {
@@ -90,7 +102,7 @@ void runServerFSM(ServerContext *server){
                 }
                 break;
             case STATE_PROCESS_FILENAME:
-                printf("SERVER: Processing filename packet...\n");
+                printf("----- FSM: STATE_PROCESS_FILENAME -----\n");
 
                 if (processClient(server, dataLen, buffer) == 0) {
                     state = STATE_TRANSFER_TO_CHILD;
@@ -100,19 +112,34 @@ void runServerFSM(ServerContext *server){
                 }
                 break;
             case STATE_TRANSFER_TO_CHILD:
-                printf("SERVER: Forking child process for file transfer...\n");
+                printf("----- FSM: STATE_TRANSFER_TO_CHILD -----\n");
                 pid_t child = fork(); 
                 if(child < 0){
                     perror("fork"); 
                 } else if (child == 0){
-                    runChild(0); 
+                    // close the connection betweem server and rcopt client
+                    close(server->socketNum); 
+                    
+                    ChildContent child;
+                    child.socketNum = socket(AF_INET6, SOCK_DGRAM, 0);  // New child socket
+                    child.error_rate = server->error_rate;
+                    child.client = server->client;
+                    child.clientAddrLen = server->clientAddrLen;
+                    child.bufSize = server->bufSize;
+                    child.winSize = server->winSize;
+                    child.attempts = 0;
+                    child.eof = false;
+                    strcpy(child.filename, server->filename);  // Add filename to child struct
+                    addToPollSet(child.socketNum); 
+                    runChild(&child);
                     exit(0); 
                 }
-
                 state = STATE_WAIT_PACKET;  // Keep listening for new clients
-
                 break; 
+
             default:
+            printf("----- FSM: DEFAULT -----\n");
+
                 printf("SERVER: Unexpected state reached. Returning to wait state.\n");
                 state = STATE_WAIT_PACKET; 
                 break;              
@@ -121,37 +148,196 @@ void runServerFSM(ServerContext *server){
     }
 }
 
-void runChild(int attempts){
-    // sendErr_init(server.error_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
+void runChild(ChildContent *child){
+    printf("----- CHILD: BEGIN -----\n");
+
+    sendErr_init(child->error_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
+
+    struct sockaddr_in6 src;
+    socklen_t srcLen = sizeof(src);
+    // uint32_t seq = 0;
+    char filePath[256];
+    snprintf(filePath, sizeof(filePath), "test_files/%s.txt", child->filename);
 
 
-    // Going to have a double while loop
+    FILE *file = fopen(filePath, "rb");
+    if (!file) {
+        perror("Error opening file");
+        close(child->socketNum);
+        return;
+    }
 
-    // bool windowOpen = true; 
-    // bool eof = false; 
-    // int child_attempts = attempts; 
+    printf("----- CHILD: PACKET TRANSFER -----\n");
+    init_window_buffer(child->winSize); 
 
-    // Open file and initilze circular buffer
+    while (!child->eof && child->attempts < MAX_ATTEMPTS) {
 
-    // while(!eof){
-        // if attempts > 10, close 
-        // while(windowOpen){
-            // if attempts > 10, close 
-            // Read from disk
-            // send data 
-            // while(poll(0) == true)
-            //      process RR / SREJ
-        // }
-        // while(!windowOpen){
-            // if attempts > 10, close 
-            // while(poll(1000))
-            //   resend lowest pdu
-            //      child_attempts++
-            // else 
-            //      process RR / SREJ
-        // }
-    // }
+        while(!is_window_full() && !child->eof){
+            printf("----- CHILD: SENDING PACKET (WINDOW OPEN) -----\n"); 
+
+            transmitData(child, file); 
+            
+            while (pollCall(0) > 0) {                
+                printf("----- CHILD: PROCESSING PACKET (WINDOW OPEN) -----\n"); 
+                    char ackPacket[MAX_PDU_SIZE]; 
+                    int ackLen = safeRecvfrom(child->socketNum, ackPacket, MAX_PDU_SIZE, 0, (struct sockaddr*)&child->client, (int *)&child->clientAddrLen);
+
+                    if (ackLen < 0) { fprintf(stderr, "Error or no data received\n"); break;  }
+                    // Check for corruption later
+                    
+                    pdu_header ack_header; 
+                    memcpy(&ack_header, ackPacket, HEADER_SIZE);
+                    
+                    switch(ack_header.flag){
+                        case 5: // RR packet
+                            processRR(child, ack_header.seq); 
+                            break; 
+                        case 6: // SREJ packet
+                            processSREJ(child, ack_header.seq); 
+                            break;
+                        case 10: // EOF ACK from sender 
+                            // Close connection
+                            printf("Received EOF ACK from client.\n");
+                            destroy_window_buffer(); 
+                            fclose(file); 
+                            return;  
+                        default:
+                        fprintf(stderr, "Unknown packet flag: %d\n", ack_header.flag);
+
+                            break; 
+                    }
+                
+            }
+            printf("----- CHILD: NO ACK (WINDOW OPEN) -----\n");
+        }
+
+        while(is_window_full()){
+            printf("----- CHILD: WINDOW CLOSED -----\n"); 
+            while(pollCall(POLL_ONE_SEC)){
+                printf("----- CHILD: RESEND LOWEST PACKET -----\n"); 
+                // Resend Lowest Packet 
+                get_lowest_unack_seq(); 
+                // Attempts++
+                child->attempts++; 
+                if(child->attempts > 10){
+                    return; 
+                }
+            }
+
+            printf("----- CHILD: PROCESSING PACKET (WINDOW CLOSED) -----\n"); 
+
+            char ackPacket[MAX_PDU_SIZE]; 
+            int ackLen = safeRecvfrom(child->socketNum, ackPacket, MAX_PDU_SIZE, 0, (struct sockaddr*)&src, (int *)&srcLen);
+
+            if (ackLen < 0) { fprintf(stderr, "Error or no data received\n"); continue;  }
+            // Check for corruption later
+            pdu_header ack_header; 
+            memcpy(&ack_header, ackPacket, HEADER_SIZE);
+            
+            switch(ack_header.flag){
+                case 5: // RR packet
+                    processRR(child, ack_header.seq); 
+                    break; 
+                case 6: // SREJ packet
+                    processSREJ(child, ack_header.seq); 
+                    break;
+                case 10: // EOF ACK from sender 
+                    // Close connection
+                    destroy_window_buffer(); 
+                    fclose(file); 
+                    return;  
+                default:
+                fprintf(stderr, "Unknown packet flag: %d\n", ack_header.flag);
+                    break; 
+            }
+            
+
+        }
+    }
+
+    printf("----- CHILD: DONE -----\n");
+    fclose(file);
+    printf("File transfer complete.\n");
+    return; 
 }
+
+void processRR(ChildContent *child, int seq){
+    printf("----- CHILD: PROCESS RR -----\n");
+    // Convert sequence number from network byte order to host order.
+    uint32_t rr = ntohl(seq);
+    printf("Received RR for %d, updating window.\n", rr);
+    
+    // Update the window buffer to mark packets < rr as acknowledged.
+    update_window(rr);
+
+    // Invalidate all packets below the acknowledged sequence.
+    invalidate_packets(rr);
+
+    print_window_buffer();
+}
+
+void processSREJ(ChildContent *child, int seq){
+    printf("----- CHILD: PROCESS SREJ -----\n");
+    printf("Received SREJ for %d, retransmitting packet.\n", seq);
+    // Retrieve the packet from the window buffer for retransmission
+    pdu_header header;
+    uint8_t data[MAX_PAYLOAD];
+    size_t dataSize;
+    if(get_packet_from_window(seq, &header, data, &dataSize)) {
+        // Retransmit the packet
+        int sent = sendPdu(child->socketNum, &child->client, header, (char *)data, dataSize);
+        if(sent < 0)
+            fprintf(stderr, "Retransmission for seq %d failed.\n", seq);
+        else
+            printf("Retransmitted packet seq %d.\n", seq);
+    } else {
+        printf("No buffered packet for seq %d found.\n", seq);
+    }
+}
+
+void transmitData(ChildContent *child, FILE *file) {
+    char data[MAX_PDU_SIZE - HEADER_SIZE];
+    int bytesRead = fread(data, 1, sizeof(data), file);
+
+    if (bytesRead == 0) {
+        // EOF reached
+        child->eof = true;
+        pdu_header eofHeader;
+        eofHeader.seq = htonl(get_lowest_unack_seq());  // Use last acknowledged sequence
+        eofHeader.flag = 10;  // EOF flag
+        eofHeader.checksum = 0;
+        sendPdu(child->socketNum, &child->client, eofHeader, NULL, 0);
+        printf("Reached EOF, sending EOF packet for seq %u\n", get_lowest_unack_seq());
+        return;
+    }
+
+    // Retrieve the current sequence number.
+    uint32_t seqToSend = get_next_seq_to_send();
+    printf("Preparing to send packet with seq %u\n", seqToSend);
+
+    pdu_header header;
+    header.seq = htonl(seqToSend);
+    header.flag = 16;  // Data packet flag
+    header.checksum = 0;  // (Compute checksum if needed)
+
+    int sent = sendPdu(child->socketNum, &child->client, header, data, bytesRead);
+    if (sent < 0) {
+        fprintf(stderr, "Failed to send data packet for seq %u\n", seqToSend);
+    } else {
+        printf("Sent data packet with seq %u (%d bytes)\n", seqToSend, bytesRead);
+    }
+
+    // Buffer the packet for potential retransmission.
+    if (!buffer_packet(seqToSend, (uint8_t *)data, bytesRead, header)) {
+        fprintf(stderr, "Buffering packet for seq %u failed\n", seqToSend);
+    } else {
+        printf("Buffered packet with seq %u\n", seqToSend);
+    }
+
+    // Debug: Print current window state.
+    print_window_buffer();
+}
+
 
 int processClient(ServerContext *server, int dataLen, char *buffer)
 {

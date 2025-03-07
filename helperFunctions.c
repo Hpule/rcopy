@@ -22,10 +22,10 @@ void printHexDump(const char *label, const char *buffer, int len) {
 int sendPdu(int sock, struct sockaddr_in6 *dest, pdu_header header, const char *payload, int payload_len) {
     int header_size = sizeof(pdu_header);
     int packet_len = header_size + payload_len;
-    char packet[MAX_PACKET_SIZE];
+    char packet[MAX_PDU_SIZE];
     
-    if(packet_len > MAX_PACKET_SIZE) {
-        fprintf(stderr, "Error: packet length (%d) exceeds maximum (%d)\n", packet_len, MAX_PACKET_SIZE);
+    if(packet_len > MAX_PDU_SIZE) {
+        fprintf(stderr, "Error: packet length (%d) exceeds maximum (%d)\n", packet_len, MAX_PDU_SIZE);
         return -1;	
     }
     
@@ -50,7 +50,7 @@ int sendPdu(int sock, struct sockaddr_in6 *dest, pdu_header header, const char *
     memcpy(packet, &temp_header, header_size);
     
     // Optionally print the hex dump.
-    printHexDump("", packet, packet_len);
+    // printHexDump("", packet, packet_len);
     
     int destLen = sizeof(struct sockaddr_in6);
     int sent = sendtoErr(sock, packet, packet_len, 0, (struct sockaddr *)dest, destLen);

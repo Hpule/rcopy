@@ -1,52 +1,46 @@
-#ifndef WINDOW_BUFFER_H
-#define WINDOW_BUFFER_H
+#ifndef WINDOWBUFFER_H
+#define WINDOWBUFFER_H
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+
 #include "helperFunctions.h"
 
-// Data structure for a buffered packet
+// Define maximum data size for each buffer entry
+#define MAX_DATA_SIZE 1400
+
+// Buffer entry structure
 typedef struct {
-    uint8_t data[MAXBUF];
     uint32_t sequence_num;
-    bool valid;
+    uint8_t *data;         // Dynamically allocated buffer
     int length;
+    bool valid;
+    pdu_header header;     // Store the header for retransmission
 } buffer_entry_t;
 
-// Circular Buffer Structure
+// Window buffer structure
 typedef struct {
-    buffer_entry_t *entries;  // Dynamic array of buffer entries
+    buffer_entry_t *entries;
     int window_size;
-    int lower;   // Lowest unacknowledged packet
-    int upper;   // Highest allowed in window
-    int current; // Current sequence number
+    uint32_t lower;        // Lower bound of window (smallest unacked seq)
+    uint32_t upper;        // Upper bound of window
+    uint32_t current;      // Next sequence number to send
+    uint32_t last_seq;     // Highest sequence number received/sent
 } window_buffer_t;
 
-// ---- Function Prototypes ----
-
-// Initialize the buffer (malloc'd array of `window_size`)
+// Function declarations
 void init_window_buffer(int window_size);
-
-// Destroy the buffer (free allocated memory)
 void destroy_window_buffer();
-
-// Add a packet to the buffer (for out-of-order storage)
-void buffer_packet(uint32_t seq, uint8_t *data, int length);
-
-// Flush the buffer when `RR` is incremented
+bool buffer_packet(uint32_t seq, uint8_t *data, int length, pdu_header header);
+bool get_packet_from_window(uint32_t seq, pdu_header *header, void *data, size_t *dataSize);
 void flush_buffer(FILE *outputFile, uint32_t *RR);
-
-// Invalidate packets that are ACKed
 void invalidate_packets(uint32_t RR);
-
-// Check if window is full (for sender)
 bool is_window_full();
-
-// Get the current lowest unacknowledged SEQ (for sender)
+void update_window(uint32_t RR);
 uint32_t get_lowest_unack_seq();
-
-// Print window buffer state (debugging)
+uint32_t get_next_seq_to_send();
+bool is_seq_in_window(uint32_t seq);
 void print_window_buffer();
 
-#endif  // WINDOW_BUFFER_H
+#endif /* WINDOWBUFFER_H */

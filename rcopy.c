@@ -55,8 +55,8 @@ rcopy_state_t stateRetry(RcopyContext *rcopy);
 void runRcopyFSM(RcopyContext *rcopy);
 void cleanup(RcopyContext *rcopy);
 void sendFilename(int socketNum, struct sockaddr_in6 *server, char* filename, int buffersize, int windowsize);
-void sendRR(int RR); 
-void sendSREJ(int RR); 
+void sendRR(int RR, RcopyContext *rcopy); 
+    void sendSREJ(int RR, RcopyContext *rcopy); 
 void sendEOF(); 
 int checkArgs(int argc, char * argv[]);
 
@@ -87,27 +87,34 @@ void runRcopyFSM(RcopyContext *rcopy)
     while (state != STATE_DONE) {
         switch (state) {
             case STATE_INIT:
+                printf("----- FSM: STATE_INIT -----\n"); 
+
                 state = stateInit(rcopy);
                 break;
 
             case STATE_HANDSHAKE:
+                printf("----- FSM: STATE_HANDSHAKE -----\n"); 
                 state = stateHandshake(rcopy);
-                return;
+                break;
 
             case STATE_FILE_RECEIVE:
+                printf("----- FSM: STATE_FILE_RECEIVE -----\n"); 
                 state = stateFileReceive(rcopy);
-                return;
+                break;
                 
             case STATE_RETRY:
+                printf("----- FSM: STATE_RETRY -----\n"); 
                 state = stateRetry(rcopy);
                 break;
 
             default:
+                printf("----- FSM: DEFAULT -----\n"); 
                 state = STATE_DONE;
                 break;
         }
     }
 
+    printf("----- File Transfer done! -----\n"); 
     cleanup(rcopy);
 }
 
@@ -134,56 +141,73 @@ void runRcopyFSM(RcopyContext *rcopy)
     // If we get duplicate data 
     //      send Ack
     //      poll for 10 secs
+
+
 rcopy_state_t stateFileReceive(RcopyContext *rcopy){
+    printf("Function: stateFileReceive\n"); 
+
     struct sockaddr_in6 src; 
     socklen_t srcLen = sizeof(src);
-    char dataPacket[MAXBUF]; 
+    char dataPacket[MAX_PDU_SIZE]; 
     uint32_t RR = 0; 
-    int SREJ = -1; 
-    
-    FILE *outputFile = fopen(rcopy->rcopy_filename, "wb");
+    // int SREJ = -1; 
+    char filePath[256];
+    snprintf(filePath, sizeof(filePath), "rcopy_download_files/%s.txt", rcopy->rcopy_filename);
+
+    FILE *outputFile = fopen(filePath, "wb");
     if(!outputFile){
         perror("Error opening file for writing");
         return STATE_DONE;    
     } 
+
     init_window_buffer(rcopy->windowsize); 
 
     while(rcopy->attempts < MAX_ATTEMPTS){
-        int dataLen = safeRecvfrom(rcopy->socketNum, dataPacket, MAX_PACKET_SIZE, 0, (struct sockaddr*)&src, (int *)&srcLen); 
+
+        pollCall(POLL_ONE_SEC); 
+        int dataLen = safeRecvfrom(rcopy->socketNum, dataPacket, MAX_PDU_SIZE, 0, (struct sockaddr*)&src, (int *)&srcLen); 
         
-        if(dataLen <= 0) {fprintf(stderr, "Error or no data received\n"); continue;}
-        if(in_cksum((uint16_t*)dataPacket, dataLen)) {fprintf(stderr, "Checksum Error\n"); sendSREJ(RR); continue;}
+        if (dataLen < 0) { fprintf(stderr, "Error or no data received\n"); continue;  }
+        if (in_cksum((uint16_t *)dataPacket, dataLen) != 0) { fprintf(stderr, "Checksum Error\n"); sendSREJ(RR, rcopy); continue;  }
 
         pdu_header header; 
         memcpy(&header, dataPacket, HEADER_SIZE); 
         uint32_t seq = ntohl(header.seq);
+
         
-        switch(header.flag){
-            case 10: // EOF
+        switch (header.flag) {
+            case 10: // EOF packet
                 printf("EOF received. Sending EOF ACK.\n");
-                sendEOF(); 
+                sendEOF(rcopy);
                 fclose(outputFile);
-                destroy_window_buffer(); 
+                destroy_window_buffer();
                 return STATE_DONE; 
-            case 16: // Data Packet
-                if(seq == RR){ // Good data
+            case 16: // Data packet
+                if (seq == RR) { // In-order data
+                    if (RR == 0) { // first packet
+                        printf("Before update, server port = %d\n", ntohs(rcopy->server.sin6_port));
+                        rcopy->server.sin6_port = src.sin6_port; 
+                        printf("Updated server port to child's port: %d\n", ntohs(src.sin6_port));
+                    }
                     fwrite(dataPacket + HEADER_SIZE, 1, dataLen - HEADER_SIZE, outputFile);
-                    fflush(outputFile); 
-                    RR++; 
+                    fflush(outputFile);
+                    RR++;
                     flush_buffer(outputFile, &RR); 
-                    sendRR(RR); 
-                }else if (seq > RR) // A packet is lost and get other data
-                {
-                    buffer_packet(seq,(uint8_t *) (dataPacket + HEADER_SIZE), dataLen - HEADER_SIZE); 
-                    sendSREJ(RR); 
-                }
-                else{ // duplicate data 
-                    sendRR(RR); 
+                    sendRR(RR, rcopy);                         
+
+                } else if (seq > RR) { // Out-of-order packet; missing a packet
+                    buffer_packet(seq, (uint8_t *)(dataPacket + HEADER_SIZE), dataLen - HEADER_SIZE, header);
+                    sendSREJ(RR, rcopy);
+                } else { // Duplicate data
+                    sendRR(RR, rcopy);
                 }
                 break; 
             default:
+                // Unknown flag—ignore or handle as needed.
                 break; 
         }
+        
+        pollCall(POLL_TEN_SEC);
     }
 
     destroy_window_buffer(); 
@@ -192,16 +216,43 @@ rcopy_state_t stateFileReceive(RcopyContext *rcopy){
 }
 
 
-void sendRR(int RR){
+void sendRR(int RR, RcopyContext *rcopy){
+    pdu_header rr; 
+    rr.seq  = htonl(RR); 
+    rr.flag = 5; 
+    rr.checksum = 0; 
 
+    printf("Sending RR to port: %d\n", ntohs(rcopy->server.sin6_port));
+    int sent = sendPdu(rcopy->socketNum, &rcopy->server, rr, "RR", strlen("RR")); 
+    
+    if(sent < 0)
+        fprintf(stderr, "Failed to send RR for seq %d\n", RR);
+    else
+        printf("Sent RR for seq %d\n", RR);
 } 
 
-void sendSREJ(int RR){
+void sendSREJ(int SREJ, RcopyContext *rcopy){
+    pdu_header srej; 
+    srej.seq  = htonl(SREJ); 
+    srej.flag = 6; 
+    srej.checksum = 0; 
 
+    int sent = sendPdu(rcopy->socketNum, &rcopy->server, srej, "SREJ", strlen("SREJ")); 
+
+    if(sent < 0) fprintf(stderr, "Failed to send SREJ for seq %d\n", SREJ);
+    else printf("Sent SREJ for seq %d\n", SREJ);
 }
 
-void sendEOF(){
+void sendEOF(RcopyContext *rcopy){
+    pdu_header eof; 
+    eof.seq = htonl(0); 
+    eof.flag = 10; 
+    eof.checksum = 0; 
 
+    int sent = sendPdu(rcopy->socketNum, &rcopy->server, eof, "EOF_ACK", strlen("EOF_ACK"));  
+
+    if(sent < 0) fprintf(stderr, "Failed to send EOF\n");
+    else printf("Sent EOF ACK\n");
 }
 
 rcopy_state_t stateRetry(RcopyContext *rcopy){
@@ -212,7 +263,7 @@ rcopy_state_t stateInit(RcopyContext *rcopy)
 {
     rcopy->socketNum = setupUdpClientToServer(&rcopy->server, rcopy->remoteMachine, rcopy->portNumber);
     addToPollSet(rcopy->socketNum);
-    // sendErr_init(rcopy->error_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
+    sendErr_init(rcopy->error_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
     return STATE_HANDSHAKE;
 }
 
@@ -226,7 +277,7 @@ void cleanup(RcopyContext *rcopy)
 rcopy_state_t stateHandshake(RcopyContext *rcopy)
 {
     rcopy->attempts = 0;
-    char buffer[MAX_PACKET_SIZE];
+    char buffer[MAX_PDU_SIZE];
     struct sockaddr_in6 src;
     socklen_t srcLen = sizeof(src);
 
@@ -236,7 +287,7 @@ rcopy_state_t stateHandshake(RcopyContext *rcopy)
         printf("Handshake attempt %d...\n", rcopy->attempts + 1);
 
          if (pollCall(POLL_ONE_SEC) >= 0) {
-            int dataLen = safeRecvfrom(rcopy->socketNum, buffer, MAX_PACKET_SIZE, 0, (struct sockaddr *)&src, (int *)&srcLen);
+            int dataLen = safeRecvfrom(rcopy->socketNum, buffer, MAX_PDU_SIZE, 0, (struct sockaddr *)&src, (int *)&srcLen);
             if (dataLen > 0) {
                 // Read header from received data.
                 pdu_header header;
@@ -247,15 +298,19 @@ rcopy_state_t stateHandshake(RcopyContext *rcopy)
                         printf("Received ACK from server.\n");
 
                         int payload_len = dataLen - HEADER_SIZE;
-                        char ackPayload[MAX_PACKET_SIZE - HEADER_SIZE + 1] = {0};
+                        char ackPayload[MAX_PAYLOAD - HEADER_SIZE + 1] = {0};
                         if (payload_len > 0) {
                             memcpy(ackPayload, buffer + HEADER_SIZE, payload_len);
                             ackPayload[payload_len] = '\0';
                             printf("ACK Payload: \"%s\"\n", ackPayload);
                         }
 
-                        if (strcmp(ackPayload, "Ok") == 0) { printf("Handshake successful! Proceeding to file reception.\n"); return STATE_FILE_RECEIVE;} 
-                        else { printf("Server responded with 'Not Ok'. Terminating.\n"); return STATE_DONE;}
+                        if (strcmp(ackPayload, "Ok") == 0) { 
+                            printf("Handshake successful! Proceeding to file reception.\n"); 
+                            return STATE_FILE_RECEIVE;} 
+                        else { 
+                            printf("Server responded with 'Not Ok'. Terminating.\n"); 
+                            return STATE_DONE;}
 
                     default:
                         printf("Unexpected packet (flag=%d) received. Ignoring.\n", header.flag);
@@ -278,7 +333,7 @@ rcopy_state_t stateHandshake(RcopyContext *rcopy)
 
 void sendFilename(int socketNum, struct sockaddr_in6 *server, char* filename, int buffersize, int windowsize)
 {
-    char pdu[MAX_PACKET_SIZE - HEADER_SIZE];
+    char pdu[MAX_PDU_SIZE - HEADER_SIZE];
     int pduLen = 0;
     uint8_t filename_len = strlen(filename);    
     uint32_t buffSize = htonl(buffersize);

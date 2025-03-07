@@ -13,7 +13,8 @@ typedef struct __attribute__((packed)) {
 } pdu_header;
 
 #define HEADER_SIZE sizeof(pdu_header)
-#define MAX_PACKET_SIZE 256
+#define MAX_PDU_SIZE 1407
+#define MAX_PAYLOAD 1400
 #define MAXBUF 1400
 #define MAX_FILENAME 100
 #define POLL_TIMEOUT 1000
