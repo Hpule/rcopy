@@ -6,6 +6,8 @@
 #include <netdb.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <dirent.h>
 #include <arpa/inet.h>
 #include <math.h>
 
@@ -14,7 +16,8 @@
 #include "safeUtil.h"
 #include "cpe464.h"
 #include "pollLib.h"
-#include "windowBuffer.h"
+// #include "windowBuffer.h"
+#include "window_buf.h"
 #include "helperFunctions.h"
 
 // ----- Rcopy FSM States ----- 
@@ -143,77 +146,88 @@ void runRcopyFSM(RcopyContext *rcopy)
     //      poll for 10 secs
 
 
-rcopy_state_t stateFileReceive(RcopyContext *rcopy){
-    printf("Function: stateFileReceive\n"); 
+    rcopy_state_t stateFileReceive(RcopyContext *rcopy){
+        printf("----- RCOPY: STATE FILE RECEIVE -----\n"); 
+    
+        struct sockaddr_in6 src; 
+        socklen_t srcLen = sizeof(src);
+        char dataPacket[MAX_PDU_SIZE]; 
+        uint32_t RR = 0; // Expected sequence number
+       
+        char filePath[256];
+        snprintf(filePath, sizeof(filePath), "rcopy_download_files/%s.txt", rcopy->rcopy_filename);
+    
+        FILE *outputFile = fopen(filePath, "wb");
+        if(!outputFile){
+            perror("Error opening file for writing");
+            return STATE_DONE;    
+        } 
+    
+        // Initialize circular buffer for incoming packets.
+        CircularBuffer* cb = initCircularBuffer(rcopy->windowsize, rcopy->buffersize);
+    
+        while(rcopy->attempts < MAX_ATTEMPTS){
+            printf("----- RCOPY: DATA TRANSFER -----\n");
+            int dataLen = safeRecvfrom(rcopy->socketNum, dataPacket, MAX_PDU_SIZE, 0, (struct sockaddr*)&src, (int *)&srcLen); 
+            if (dataLen < 0) {
+                fprintf(stderr, "Error or no data received\n");
+                continue;
+            }
+            if (in_cksum((uint16_t *)dataPacket, dataLen) != 0) {
+                fprintf(stderr, "Checksum error. Sending SREJ for %u\n", RR);
+                sendSREJ(RR, rcopy);
+                continue;
+            }
+            
+            pdu_header header; 
+            memcpy(&header, dataPacket, HEADER_SIZE); 
+            uint32_t seq = ntohl(header.seq);
 
-    struct sockaddr_in6 src; 
-    socklen_t srcLen = sizeof(src);
-    char dataPacket[MAX_PDU_SIZE]; 
-    uint32_t RR = 0; 
-    // int SREJ = -1; 
-    char filePath[256];
-    snprintf(filePath, sizeof(filePath), "rcopy_download_files/%s.txt", rcopy->rcopy_filename);
-
-    FILE *outputFile = fopen(filePath, "wb");
-    if(!outputFile){
-        perror("Error opening file for writing");
-        return STATE_DONE;    
-    } 
-
-    init_window_buffer(rcopy->windowsize); 
-
-    while(rcopy->attempts < MAX_ATTEMPTS){
-
-        pollCall(POLL_ONE_SEC); 
-        int dataLen = safeRecvfrom(rcopy->socketNum, dataPacket, MAX_PDU_SIZE, 0, (struct sockaddr*)&src, (int *)&srcLen); 
-        
-        if (dataLen < 0) { fprintf(stderr, "Error or no data received\n"); continue;  }
-        if (in_cksum((uint16_t *)dataPacket, dataLen) != 0) { fprintf(stderr, "Checksum Error\n"); sendSREJ(RR, rcopy); continue;  }
-
-        pdu_header header; 
-        memcpy(&header, dataPacket, HEADER_SIZE); 
-        uint32_t seq = ntohl(header.seq);
-
-        
-        switch (header.flag) {
-            case 10: // EOF packet
-                printf("EOF received. Sending EOF ACK.\n");
-                sendEOF(rcopy);
-                fclose(outputFile);
-                destroy_window_buffer();
-                return STATE_DONE; 
-            case 16: // Data packet
-                if (seq == RR) { // In-order data
-                    if (RR == 0) { // first packet
-                        printf("Before update, server port = %d\n", ntohs(rcopy->server.sin6_port));
-                        rcopy->server.sin6_port = src.sin6_port; 
-                        printf("Updated server port to child's port: %d\n", ntohs(src.sin6_port));
+            if(RR == 0 ){
+                rcopy->server.sin6_port = src.sin6_port; 
+                printf("Updated server port to child's port: %d\n", ntohs(src.sin6_port));
+            }
+            
+            switch (header.flag) {
+                case 10: // EOF packet
+                    printf("----- RCOPY: EOF RECEIVED -----\n");
+                    sendEOF(rcopy);
+                    // Flush any buffered packets before closing, if needed.
+                    // (You may write a flush function for the CircularBuffer here.)
+                    freeCircularBuffer(cb);
+                    fclose(outputFile);
+                    return STATE_DONE;
+                case 16: // Data packet
+                    if (seq == RR) { // Expected data
+                        int payloadSize = dataLen - HEADER_SIZE;
+                        printf("Received expected packet: seq=%u, expected=%u, payload=%d bytes\n", seq, RR, payloadSize);
+                        // Write directly to file.
+                        fwrite(dataPacket + HEADER_SIZE, 1, payloadSize, outputFile);
+                        fflush(outputFile);
+                        RR++;
+                        // Optionally flush buffered packets from cb if you implement that.
+                        sendRR(RR, rcopy);
+                    } else if (seq > RR) { // Out-of-order packet, buffer it.
+                        int payloadSize = dataLen - HEADER_SIZE;
+                        printf("Received out-of-order packet: seq=%u, expected=%u, payload=%d bytes. Buffering.\n", seq, RR, payloadSize);
+                        // Write the packet into the circular buffer.
+                        writeCircularBuffer(cb, (uint8_t*)(dataPacket + HEADER_SIZE), payloadSize);
+                        sendSREJ(RR, rcopy);
+                    } else { // Duplicate packet.
+                        printf("Received duplicate packet: seq=%u, expected=%u. Resending RR.\n", seq, RR);
+                        sendRR(RR, rcopy);
                     }
-                    fwrite(dataPacket + HEADER_SIZE, 1, dataLen - HEADER_SIZE, outputFile);
-                    fflush(outputFile);
-                    RR++;
-                    flush_buffer(outputFile, &RR); 
-                    sendRR(RR, rcopy);                         
-
-                } else if (seq > RR) { // Out-of-order packet; missing a packet
-                    buffer_packet(seq, (uint8_t *)(dataPacket + HEADER_SIZE), dataLen - HEADER_SIZE, header);
-                    sendSREJ(RR, rcopy);
-                } else { // Duplicate data
-                    sendRR(RR, rcopy);
-                }
-                break; 
-            default:
-                // Unknown flag—ignore or handle as needed.
-                break; 
+                    break;
+                default:
+                    printf("Unknown flag %d received. Ignoring.\n", header.flag);
+                    break;
+            }
         }
-        
-        pollCall(POLL_TEN_SEC);
+    
+        freeCircularBuffer(cb);
+        fclose(outputFile);
+        return STATE_DONE;
     }
-
-    destroy_window_buffer(); 
-    fclose(outputFile);
-    return STATE_DONE;  
-}
 
 
 void sendRR(int RR, RcopyContext *rcopy){

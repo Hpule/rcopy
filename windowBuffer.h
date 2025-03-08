@@ -5,31 +5,28 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "helperFunctions.h"
+#include "helperFunctions.h"  // Assuming this defines pdu_header and MAX_DATA_SIZE
 
-// Define maximum data size for each buffer entry
-#define MAX_DATA_SIZE 1400
-
-// Buffer entry structure
+// Define the buffer entry structure.
 typedef struct {
-    uint32_t sequence_num;
-    uint8_t *data;         // Dynamically allocated buffer
-    int length;
+    uint32_t sequence_number;
+    uint8_t *data;         // Dynamically allocated payload buffer
+    int length;            // Length of the stored payload
     bool valid;
-    pdu_header header;     // Store the header for retransmission
+    pdu_header header;     // Header for potential retransmission
 } buffer_entry_t;
 
-// Window buffer structure
+// Define the window buffer structure.
 typedef struct {
-    buffer_entry_t *entries;
-    int window_size;
-    uint32_t lower;        // Lower bound of window (smallest unacked seq)
-    uint32_t upper;        // Upper bound of window
-    uint32_t current;      // Next sequence number to send
-    uint32_t last_seq;     // Highest sequence number received/sent
+    buffer_entry_t *entries;    // Array of buffer entries (packets)
+    int window_size;            // Window size (number of packets)
+    uint32_t lower;             // Lower bound of the window (smallest unacknowledged sequence)
+    uint32_t current;           // Next sequence number to send
+    uint32_t upper;             // Upper bound of the window
+    uint32_t last_seq;          // Highest sequence number stored so far
 } window_buffer_t;
 
-// Function declarations
+// Function declarations:
 void init_window_buffer(int window_size);
 void destroy_window_buffer();
 bool buffer_packet(uint32_t seq, uint8_t *data, int length, pdu_header header);
@@ -42,5 +39,6 @@ uint32_t get_lowest_unack_seq();
 uint32_t get_next_seq_to_send();
 bool is_seq_in_window(uint32_t seq);
 void print_window_buffer();
+void print_luc(window_buffer_t *buffer);  // Your existing print, if needed
 
 #endif /* WINDOWBUFFER_H */

@@ -10,12 +10,14 @@
 #include <dirent.h>
 #include <stdbool.h>
 
+
 #include "gethostbyname.h"
 #include "networks.h"
 #include "safeUtil.h"
 #include "cpe464.h"
 #include "pollLib.h"
-#include "windowBuffer.h"
+// #include "windowBuffer.h"
+#include "window_buf.h"
 #include "helperFunctions.h"
 
 // ----- Server FSM States ----- 
@@ -148,17 +150,15 @@ void runServerFSM(ServerContext *server){
     }
 }
 
-void runChild(ChildContent *child){
+void runChild(ChildContent *child) {
     printf("----- CHILD: BEGIN -----\n");
 
     sendErr_init(child->error_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
 
     struct sockaddr_in6 src;
     socklen_t srcLen = sizeof(src);
-    // uint32_t seq = 0;
     char filePath[256];
     snprintf(filePath, sizeof(filePath), "test_files/%s.txt", child->filename);
-
 
     FILE *file = fopen(filePath, "rb");
     if (!file) {
@@ -168,97 +168,76 @@ void runChild(ChildContent *child){
     }
 
     printf("----- CHILD: PACKET TRANSFER -----\n");
-    init_window_buffer(child->winSize); 
 
+    // Initialize the circular buffer with capacity = window size and payload size = child->bufSize
+    CircularBuffer* cb = initCircularBuffer(child->winSize, child->bufSize);
+
+    // Main sending loop.
     while (!child->eof && child->attempts < MAX_ATTEMPTS) {
+        // When the window is not full, send a new packet.
+        if (!is_full(cb)) {
+            printf("----- CHILD: SENDING PACKET (WINDOW OPEN) -----\n");
 
-        while(!is_window_full() && !child->eof){
-            printf("----- CHILD: SENDING PACKET (WINDOW OPEN) -----\n"); 
-
-            transmitData(child, file); 
-            
-            while (pollCall(0) > 0) {                
-                printf("----- CHILD: PROCESSING PACKET (WINDOW OPEN) -----\n"); 
-                    char ackPacket[MAX_PDU_SIZE]; 
-                    int ackLen = safeRecvfrom(child->socketNum, ackPacket, MAX_PDU_SIZE, 0, (struct sockaddr*)&child->client, (int *)&child->clientAddrLen);
-
-                    if (ackLen < 0) { fprintf(stderr, "Error or no data received\n"); break;  }
-                    // Check for corruption later
-                    
-                    pdu_header ack_header; 
-                    memcpy(&ack_header, ackPacket, HEADER_SIZE);
-                    
-                    switch(ack_header.flag){
-                        case 5: // RR packet
-                            processRR(child, ack_header.seq); 
-                            break; 
-                        case 6: // SREJ packet
-                            processSREJ(child, ack_header.seq); 
-                            break;
-                        case 10: // EOF ACK from sender 
-                            // Close connection
-                            printf("Received EOF ACK from client.\n");
-                            destroy_window_buffer(); 
-                            fclose(file); 
-                            return;  
-                        default:
-                        fprintf(stderr, "Unknown packet flag: %d\n", ack_header.flag);
-
-                            break; 
-                    }
-                
+            // Read file data up to the desired payload size.
+            uint8_t payload[MAX_PAYLOAD];
+            int bytesRead = fread(payload, 1, child->bufSize, file);
+            if (bytesRead < child->bufSize) {
+                // EOF reached
+                child->eof = true;
+                pdu_header eofHeader;
+                eofHeader.seq = htonl(get_lowest_unack_seq());  // You may create a similar getter using cb->lower
+                eofHeader.flag = 10; // EOF flag
+                eofHeader.checksum = 0;
+                sendPdu(child->socketNum, &child->client, eofHeader, NULL, 0);
+                printf("Reached EOF, sending EOF packet for seq %u\n", get_lowest_unack_seq());
+                break;
             }
-            printf("----- CHILD: NO ACK (WINDOW OPEN) -----\n");
+
+            // Get the next sequence number from your circular buffer (using current field)
+            uint32_t seqToSend = cb->current;
+            printf("Preparing to send packet with seq %u, payload = %d bytes\n", seqToSend, bytesRead);
+
+            pdu_header header;
+            header.seq = htonl(seqToSend);
+            header.flag = 16;  // Data packet flag
+            header.checksum = 0;
+
+            // Calculate total PDU size: HEADER_SIZE + bytesRead. (Ensure it's within MAX_PDU_SIZE.)
+            int totalPduSize = HEADER_SIZE + bytesRead;
+            if (totalPduSize > MAX_PDU_SIZE) {
+                fprintf(stderr, "Error: total PDU size (%d) exceeds MAX_PDU_SIZE (%d)\n", totalPduSize, MAX_PDU_SIZE);
+                break;
+            }
+
+            int sent = sendPdu(child->socketNum, &child->client, header, (char*)payload, bytesRead);
+            if (sent < 0) {
+                fprintf(stderr, "Failed to send data packet for seq %u\n", seqToSend);
+            } else {
+                printf("Sent data packet with seq %u (%d bytes payload, %d total bytes)\n",
+                       seqToSend, bytesRead, totalPduSize);
+            }
+
+            // Write packet into the circular buffer.
+            writeCircularBuffer(cb, payload, bytesRead);
+
+            // Print the current state of the circular buffer.
+            printCircularBuffer(cb);
         }
-
-        while(is_window_full()){
-            printf("----- CHILD: WINDOW CLOSED -----\n"); 
-            while(pollCall(POLL_ONE_SEC)){
-                printf("----- CHILD: RESEND LOWEST PACKET -----\n"); 
-                // Resend Lowest Packet 
-                get_lowest_unack_seq(); 
-                // Attempts++
-                child->attempts++; 
-                if(child->attempts > 10){
-                    return; 
-                }
-            }
-
-            printf("----- CHILD: PROCESSING PACKET (WINDOW CLOSED) -----\n"); 
-
-            char ackPacket[MAX_PDU_SIZE]; 
-            int ackLen = safeRecvfrom(child->socketNum, ackPacket, MAX_PDU_SIZE, 0, (struct sockaddr*)&src, (int *)&srcLen);
-
-            if (ackLen < 0) { fprintf(stderr, "Error or no data received\n"); continue;  }
-            // Check for corruption later
-            pdu_header ack_header; 
-            memcpy(&ack_header, ackPacket, HEADER_SIZE);
-            
-            switch(ack_header.flag){
-                case 5: // RR packet
-                    processRR(child, ack_header.seq); 
-                    break; 
-                case 6: // SREJ packet
-                    processSREJ(child, ack_header.seq); 
-                    break;
-                case 10: // EOF ACK from sender 
-                    // Close connection
-                    destroy_window_buffer(); 
-                    fclose(file); 
-                    return;  
-                default:
-                fprintf(stderr, "Unknown packet flag: %d\n", ack_header.flag);
-                    break; 
-            }
-            
-
+        else {
+            // When the window is full, you would normally process ACKs, retransmit, etc.
+            // For debugging, just print the state and increment an attempt.
+            printf("----- CHILD: WINDOW FULL -----\n");
+            printCircularBuffer(cb);
+            child->attempts++;
+            if(child->attempts > MAX_ATTEMPTS) break;
         }
     }
 
-    printf("----- CHILD: DONE -----\n");
+    // Clean up the circular buffer.
+    freeCircularBuffer(cb);
     fclose(file);
+    printf("----- CHILD: DONE -----\n");
     printf("File transfer complete.\n");
-    return; 
 }
 
 void processRR(ChildContent *child, int seq){
@@ -296,46 +275,58 @@ void processSREJ(ChildContent *child, int seq){
 }
 
 void transmitData(ChildContent *child, FILE *file) {
-    char data[MAX_PDU_SIZE - HEADER_SIZE];
-    int bytesRead = fread(data, 1, sizeof(data), file);
-
-    if (bytesRead == 0) {
-        // EOF reached
-        child->eof = true;
-        pdu_header eofHeader;
-        eofHeader.seq = htonl(get_lowest_unack_seq());  // Use last acknowledged sequence
-        eofHeader.flag = 10;  // EOF flag
-        eofHeader.checksum = 0;
-        sendPdu(child->socketNum, &child->client, eofHeader, NULL, 0);
-        printf("Reached EOF, sending EOF packet for seq %u\n", get_lowest_unack_seq());
-        return;
-    }
-
-    // Retrieve the current sequence number.
-    uint32_t seqToSend = get_next_seq_to_send();
-    printf("Preparing to send packet with seq %u\n", seqToSend);
-
-    pdu_header header;
-    header.seq = htonl(seqToSend);
-    header.flag = 16;  // Data packet flag
-    header.checksum = 0;  // (Compute checksum if needed)
-
-    int sent = sendPdu(child->socketNum, &child->client, header, data, bytesRead);
-    if (sent < 0) {
-        fprintf(stderr, "Failed to send data packet for seq %u\n", seqToSend);
-    } else {
-        printf("Sent data packet with seq %u (%d bytes)\n", seqToSend, bytesRead);
-    }
-
-    // Buffer the packet for potential retransmission.
-    if (!buffer_packet(seqToSend, (uint8_t *)data, bytesRead, header)) {
-        fprintf(stderr, "Buffering packet for seq %u failed\n", seqToSend);
-    } else {
-        printf("Buffered packet with seq %u\n", seqToSend);
-    }
-
-    // Debug: Print current window state.
-    print_window_buffer();
+     // Determine the maximum payload to read.
+     int payload_limit = (child->bufSize <= MAX_PAYLOAD) ? child->bufSize : MAX_PAYLOAD;
+    
+     char data[MAX_PAYLOAD];  // MAX_PAYLOAD is 1400
+     int bytesRead = fread(data, 1, payload_limit, file); // Read up to payload_limit bytes
+ 
+     if (bytesRead == 0) {
+         // EOF reached
+         child->eof = true;
+         pdu_header eofHeader;
+         eofHeader.seq = htonl(get_lowest_unack_seq());  // Use last acknowledged sequence
+         eofHeader.flag = 10;  // EOF flag
+         eofHeader.checksum = 0;
+         sendPdu(child->socketNum, &child->client, eofHeader, NULL, 0);
+         printf("Reached EOF, sending EOF packet for seq %u\n", get_lowest_unack_seq());
+         return;
+     }
+ 
+     // Get the current sequence number.
+     uint32_t seqToSend = get_next_seq_to_send();
+     printf("Preparing to send packet with seq %u, payload = %d bytes\n", seqToSend, bytesRead);
+ 
+     pdu_header header;
+     header.seq = htonl(seqToSend);
+     header.flag = 16;  // Data packet flag
+     header.checksum = 0;  // (Compute checksum if needed)
+ 
+     // Calculate total PDU size: header (7 bytes) + payload.
+     int totalPduSize = HEADER_SIZE + bytesRead;
+     if (totalPduSize > MAX_PDU_SIZE) {
+         fprintf(stderr, "Error: total PDU size (%d bytes) exceeds maximum allowed (%d bytes)\n",
+                 totalPduSize, MAX_PDU_SIZE);
+         return;
+     }
+ 
+     int sent = sendPdu(child->socketNum, &child->client, header, data, bytesRead);
+     if (sent < 0) {
+         fprintf(stderr, "Failed to send data packet for seq %u\n", seqToSend);
+     } else {
+         printf("Sent data packet with seq %u (%d bytes payload, %d total bytes)\n",
+                seqToSend, bytesRead, totalPduSize);
+     }
+ 
+     // Buffer the packet for potential retransmission.
+     if (!buffer_packet(seqToSend, (uint8_t *)data, bytesRead, header)) {
+         fprintf(stderr, "Buffering packet for seq %u failed\n", seqToSend);
+     } else {
+         printf("Buffered packet with seq %u\n", seqToSend);
+     }
+ 
+     // Debug: Print the current state of the window buffer.
+     print_window_buffer();
 }
 
 

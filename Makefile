@@ -6,7 +6,7 @@ CFLAGS= -g -Wall -pedantic
 LIBS = 
 
 # Include new object files (helperFunctions.o and windowBuffer.o)
-OBJS = networks.o gethostbyname.o pollLib.o safeUtil.o helperFunctions.o windowBuffer.o
+OBJS = networks.o gethostbyname.o pollLib.o safeUtil.o helperFunctions.o windowBuffer.o window_buf.o
 
 # Uncomment next two lines if you're using sendtoErr() library
 LIBS += libcpe464.2.21.a -lstdc++ -ldl
