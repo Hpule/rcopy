@@ -34,4 +34,7 @@ int sendAck(int sock, struct sockaddr_in6 *dest, uint32_t seq, const char *ackPa
 
 int validateChecksum(uint8_t *buffer, int dataLen); 
 
+
+
+
 #endif // HELPER_FUNCTIONS_H

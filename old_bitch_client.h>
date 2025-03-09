@@ -29,8 +29,6 @@ typedef enum {
     STATE_DONE
 } rcopy_state_t;
 
-
-
 // ----- Rcopy Context Structure ----- 
 typedef struct {
     int socketNum;
@@ -47,15 +45,6 @@ typedef struct {
     bool eof; 
 } RcopyContext;
 
-typedef struct {
-    FILE *outputFile;
-    WindowBuffer buffer;
-    uint32_t expectedSeq;
-    int attempts;
-    bool complete;
-} ReceiveState;
-
-
 // ----- Other stuctures ----- 
 // Circular Buffer = new circular buffer 
 
@@ -69,19 +58,10 @@ int checkArgs(int argc, char * argv[]);
 
 void rcopyFSM(RcopyContext *rcopy);
 void sendFilename(int socketNum, struct sockaddr_in6 *server, char* filename, int buffersize, int windowsize);
-
-void initReceiveState(ReceiveState *state, int windowSize, int bufferSize, FILE *file); 
-bool receivePacket(RcopyContext *rcopy, ReceiveState *state); 
-bool handlePacketByType(RcopyContext *rcopy, ReceiveState *state, pdu_header *header, char *packet, int packetLen); 
-bool processDataPacket(RcopyContext *rcopy, ReceiveState *state, char *packet, int packetLen, uint32_t seq); 
-
 void sendRR(int RR, RcopyContext *rcopy); 
 void sendSREJ(int SREJ, RcopyContext *rcopy); 
-void sendEOF(uint32_t seqNum, RcopyContext *rcopy); 
-
+void sendEOF(); 
 void cleanup(RcopyContext *rcopy);
-
-
 
 
 // ----- Main Function -----
@@ -250,6 +230,158 @@ rcopy_state_t stateHandshake(RcopyContext *rcopy)
     return STATE_DONE;
 }
 
+
+//     // Array Buffer 
+// // 
+//     // ----- Start Recieving data ----- 
+//     // While we don't get an EOF
+//     // if we get an expected packet
+//     //      send RR to server, increase rr to next data packet we want
+//     //      Write to file - should remove item from buffer. 
+//     //      
+//     // else if a packet if larger than the one we expect
+//     //      send SREJ of the packet that we are missing
+//     //      Buffer any data recieved until we get missing data packet
+//     //      increase attempts
+//     // If we get an EOF
+//     //      send EOF ack
+//     //      close file
+//     //      Change state to done
+//     // 
+//     // If poll times out 
+//     //      print error 
+//     //      next state is done 
+//     // If we get duplicate data 
+//     //      send Ack
+//     //      poll for 10 secs
+
+
+rcopy_state_t stateFileReceive(RcopyContext *rcopy){
+    printf("----- RCOPY: STATE FILE RECEIVE -----\n");
+    
+    char filePath[256];
+    snprintf(filePath, sizeof(filePath), "rcopy_download_files/%s", rcopy->rcopy_filename);
+    
+    FILE *outputFile = fopen(filePath, "wb");
+    if(!outputFile) {
+        perror("Error opening file for writing");
+        return STATE_DONE;
+    }
+    
+    // Initialize window buffer
+    WindowBuffer wb;
+    init_window(&wb, rcopy->windowsize, rcopy->buffersize, NULL);
+    
+    uint32_t expectedSeq = 0;
+    rcopy->attempts = 0;
+    
+    while(!rcopy->eof && rcopy->attempts < MAX_ATTEMPTS) {
+        char packet[MAX_PDU_SIZE];
+        struct sockaddr_in6 src;
+        socklen_t srcLen = sizeof(src);
+        
+        int pollResult = pollCall(POLL_ONE_SEC);
+        if(pollResult < 0) {
+            rcopy->attempts++;
+            printf("Timeout %d/%d\n", rcopy->attempts, MAX_ATTEMPTS);
+            sendRR(expectedSeq, rcopy);
+            continue;
+        }
+        
+        int packetLen = safeRecvfrom(rcopy->socketNum, packet, MAX_PDU_SIZE, 0, 
+                                    (struct sockaddr*)&src, (int*)&srcLen);
+                                    
+        if(packetLen < 0 || in_cksum((uint16_t*)packet, packetLen) != 0) {
+            sendSREJ(expectedSeq, rcopy);
+            continue;
+        }
+        
+        // Reset timeout counter
+        rcopy->attempts = 0;
+        
+        // Process packet
+        pdu_header header;
+        memcpy(&header, packet, HEADER_SIZE);
+        uint32_t seq = ntohl(header.seq);
+        
+        if(header.flag == 10) { // EOF
+            printf("EOF received\n");
+            sendEOF(rcopy);
+            rcopy->eof = true;
+        }
+        else if(seq == expectedSeq) { // Expected packet
+            printf("Received expected packet %u\n", seq);
+            fwrite(packet + HEADER_SIZE, 1, packetLen - HEADER_SIZE, outputFile);
+            expectedSeq++;
+            
+            // Check buffered packets
+            while(wb.panes[expectedSeq % wb.window_size].seq_num == expectedSeq) {
+                fwrite(wb.panes[expectedSeq % wb.window_size].data, 1, 
+                      wb.buffer_size, outputFile);
+                expectedSeq++;
+            }
+            
+            sendRR(expectedSeq, rcopy);
+        }
+        else if(seq > expectedSeq) { // Out-of-order
+            printf("Out-of-order packet %u, expected %u\n", seq, expectedSeq);
+            uint32_t index = seq % wb.window_size;
+            wb.panes[index].seq_num = seq;
+            memcpy(wb.panes[index].data, packet + HEADER_SIZE, packetLen - HEADER_SIZE);
+            sendSREJ(expectedSeq, rcopy);
+        }
+        else { // Duplicate
+            printf("Duplicate packet %u\n", seq);
+            sendRR(expectedSeq, rcopy);
+        }
+    }
+    
+    fclose(outputFile);
+    free_window(&wb);
+    return STATE_DONE;
+}
+
+
+void sendRR(int RR, RcopyContext *rcopy){
+    pdu_header rr; 
+    rr.seq  = htonl(RR); 
+    rr.flag = 5; 
+    rr.checksum = 0; 
+
+    printf("Sending RR to port: %d\n", ntohs(rcopy->server.sin6_port));
+    int sent = sendPdu(rcopy->socketNum, &rcopy->server, rr, "RR", strlen("RR")); 
+    
+    if(sent < 0)
+        fprintf(stderr, "Failed to send RR for seq %d\n", RR);
+    else
+        printf("Sent RR for seq %d\n", RR);
+} 
+
+void sendSREJ(int SREJ, RcopyContext *rcopy){
+    pdu_header srej; 
+    srej.seq  = htonl(SREJ); 
+    srej.flag = 6; 
+    srej.checksum = 0; 
+
+    int sent = sendPdu(rcopy->socketNum, &rcopy->server, srej, "SREJ", strlen("SREJ")); 
+
+    if(sent < 0) fprintf(stderr, "Failed to send SREJ for seq %d\n", SREJ);
+    else printf("Sent SREJ for seq %d\n", SREJ);
+}
+
+void sendEOF(RcopyContext *rcopy){
+    pdu_header eof; 
+    eof.seq = htonl(0); 
+    eof.flag = 10; 
+    eof.checksum = 0; 
+
+    int sent = sendPdu(rcopy->socketNum, &rcopy->server, eof, "EOF_ACK", strlen("EOF_ACK"));  
+
+    if(sent < 0) fprintf(stderr, "Failed to send EOF\n");
+    else printf("Sent EOF ACK\n");
+}
+
+
 void sendFilename(int socketNum, struct sockaddr_in6 *server, char* filename, int buffersize, int windowsize)
 {
     char pdu[MAX_PDU_SIZE - HEADER_SIZE];
@@ -283,139 +415,3 @@ void sendFilename(int socketNum, struct sockaddr_in6 *server, char* filename, in
     }
     printf("Sent filename packet: %s\n", filename);
 }
-
-rcopy_state_t stateFileReceive(RcopyContext *rcopy) {
-    char filePath[256];
-    snprintf(filePath, sizeof(filePath), "rcopy_download_files/%s.txt", rcopy->rcopy_filename);
-    
-    FILE *outputFile = fopen(filePath, "wb");
-    if(!outputFile) {
-        perror("Error opening file for writing");
-        return STATE_DONE;
-    }
-    
-    // Initialize window buffer for receiving
-    WindowBuffer wb;
-    init_window(&wb, rcopy->windowsize, rcopy->buffersize, NULL);
-    
-    uint32_t expectedSeq = 0;
-    rcopy->attempts = 0;
-    
-    while(!rcopy->eof && rcopy->attempts < MAX_ATTEMPTS) {
-        int pollResult = pollCall(POLL_ONE_SEC);
-        
-        if(pollResult <= 0) {
-            rcopy->attempts++;
-            printf("Timeout %d/%d\n", rcopy->attempts, MAX_ATTEMPTS);
-            sendRR(expectedSeq, rcopy); // Resend current RR on timeout
-            continue;
-        }
-        
-        // Reset timeout counter on successful poll
-        rcopy->attempts = 0;
-        
-        // Receive and check packet
-        char packet[MAX_PDU_SIZE];
-        struct sockaddr_in6 src;
-        socklen_t srcLen = sizeof(src);
-        int packetLen = safeRecvfrom(rcopy->socketNum, packet, MAX_PDU_SIZE, 0, 
-                                    (struct sockaddr*)&src, (int*)&srcLen);
-        
-        if(packetLen < 0 || in_cksum((uint16_t*)packet, packetLen) != 0) {
-            sendSREJ(expectedSeq, rcopy);
-            continue;
-        }
-        
-        // Process packet
-        pdu_header header;
-        memcpy(&header, packet, HEADER_SIZE);
-        uint32_t seqNum = ntohl(header.seq);
-        
-        if(header.flag == 10) { // EOF
-            printf("\nCLIENT - RECEIVED EOF PACKET:\n");
-            printf("Sequence: %u\n", seqNum);
-            printf("Received length: %ld bytes\n", packetLen - HEADER_SIZE);
-            printf("Data hex: ");
-            for(int i = 0; i < packetLen - HEADER_SIZE; i++) {
-                printf("%02x ", (unsigned char)packet[HEADER_SIZE + i]);
-            }
-            printf("\nData text: \"");
-            for(int i = 0; i < packetLen - HEADER_SIZE; i++) {
-                char c = packet[HEADER_SIZE + i];
-                if(c >= 32 && c <= 126) printf("%c", c);
-                else printf(".");
-            }
-            printf("\"\n");
-
-            if(seqNum == expectedSeq) {
-                printf("EOF received and acknowledged\n");
-                fwrite(packet + HEADER_SIZE, 1, packetLen - HEADER_SIZE, outputFile);
-                sendEOF(seqNum, rcopy);
-                rcopy->eof = true;
-            } else {
-                sendSREJ(expectedSeq, rcopy);
-            }
-        }
-        else if(seqNum >= expectedSeq && seqNum < expectedSeq + rcopy->windowsize) {
-            // Store packet in window buffer
-            uint32_t index = seqNum % wb.window_size;
-            wb.panes[index].seq_num = seqNum;
-            memcpy(wb.panes[index].data, packet + HEADER_SIZE, packetLen - HEADER_SIZE);
-            
-            // Process all contiguous packets
-            if(seqNum == expectedSeq) {
-                // Write current packet and all consecutive buffered packets
-                while(wb.panes[expectedSeq % wb.window_size].seq_num == expectedSeq) {
-                    printf("Writing packet %u to file\n", expectedSeq);
-                    fwrite(wb.panes[expectedSeq % wb.window_size].data, 1, 
-                          wb.buffer_size, outputFile);
-                    expectedSeq++;
-                }
-                sendRR(expectedSeq, rcopy);
-            } else {
-                // Out-of-order packet - request missing packet
-                printf("Out-of-order packet %u, expecting %u\n", seqNum, expectedSeq);
-                sendSREJ(expectedSeq, rcopy);
-            }
-        } else if(seqNum < expectedSeq) {
-            // Duplicate packet
-            printf("Duplicate packet %u\n", seqNum);
-            sendRR(expectedSeq, rcopy);
-        } else {
-            // Packet outside window
-            printf("Packet %u outside window\n", seqNum);
-            sendSREJ(expectedSeq, rcopy);
-        }
-    }
-    
-    fclose(outputFile);
-    free_window(&wb);
-    return STATE_DONE;
-}
-
-void sendRR(int RR, RcopyContext *rcopy) {
-    pdu_header rr; 
-    rr.seq = htonl(RR); 
-    rr.flag = 5; 
-    rr.checksum = 0; 
-    sendPdu(rcopy->socketNum, &rcopy->server, rr, "RR", strlen("RR"));
-}
-
-void sendSREJ(int SREJ, RcopyContext *rcopy) {
-    pdu_header srej; 
-    srej.seq = htonl(SREJ); 
-    srej.flag = 6; 
-    srej.checksum = 0; 
-    sendPdu(rcopy->socketNum, &rcopy->server, srej, "SREJ", strlen("SREJ"));
-}
-
-void sendEOF(uint32_t seqNum, RcopyContext *rcopy) {
-    pdu_header eof; 
-    eof.seq = htonl(0); 
-    eof.flag = 10; 
-    eof.checksum = 0; 
-    sendPdu(rcopy->socketNum, &rcopy->server, eof, "EOF_ACK", strlen("EOF_ACK"));
-    printf("Sent EOF ACK with seq=%u\n", seqNum);
-
-}
-
