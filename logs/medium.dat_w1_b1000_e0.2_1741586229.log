@@ -1,0 +1,97 @@
+Send Err-INIT ErrRate: 0.20 Drop: Y Flip: N Rand: Y Debug: Y
+SEND MSG#   1 SEQ#   0 LEN   37 FLAGS  8   -FNAME request - DROPPED 
+SEND MSG#   2 SEQ#   0 LEN   37 FLAGS  8   -FNAME request
+RECV          SEQ#   0 LEN    9 FLAGS  9   -FNAME response
+RECV          SEQ#   0 LEN 1007 FLAGS 16   -Data #:    0
+SEND MSG#   3 SEQ#   1 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   1 LEN 1007 FLAGS 16   -Data #:    1 - RECV Corrupted packet
+SEND MSG#   4 SEQ#   1 LEN   11 FLAGS  6   -SREJ #: 1397900618 - DROPPED 
+SEND MSG#   5 SEQ#   1 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   1 LEN 1007 FLAGS 16   -Data #:    1
+SEND MSG#   6 SEQ#   2 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   2 LEN 1007 FLAGS 16   -Data #:    2
+SEND MSG#   7 SEQ#   3 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   3 LEN 1007 FLAGS 16   -Data #:    3
+SEND MSG#   8 SEQ#   4 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   4 LEN 1007 FLAGS 16   -Data #:    4 - RECV Corrupted packet
+SEND MSG#   9 SEQ#   4 LEN   11 FLAGS  6   -SREJ #: 1397900618
+RECV          SEQ#   4 LEN 1007 FLAGS 16   -Data #:    4
+SEND MSG#  10 SEQ#   5 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   5 LEN 1007 FLAGS 16   -Data #:    5 - RECV Corrupted packet
+SEND MSG#  11 SEQ#   5 LEN   11 FLAGS  6   -SREJ #: 1397900618
+RECV          SEQ#   5 LEN 1007 FLAGS 16   -Data #:    5 - RECV Corrupted packet
+SEND MSG#  12 SEQ#   5 LEN   11 FLAGS  6   -SREJ #: 1397900618
+RECV          SEQ#   5 LEN 1007 FLAGS 16   -Data #:    5
+SEND MSG#  13 SEQ#   6 LEN    9 FLAGS  5   -RR #:   1381105664 - DROPPED 
+SEND MSG#  14 SEQ#   6 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   5 LEN 1007 FLAGS 16   -Data #:    5 - RECV Corrupted packet
+SEND MSG#  15 SEQ#   6 LEN   11 FLAGS  6   -SREJ #: 1397900618
+RECV          SEQ#   6 LEN 1007 FLAGS 16   -Data #:    6 - RECV Corrupted packet
+SEND MSG#  16 SEQ#   6 LEN   11 FLAGS  6   -SREJ #: 1397900618
+RECV          SEQ#   6 LEN 1007 FLAGS 16   -Data #:    6 - RECV Corrupted packet
+SEND MSG#  17 SEQ#   6 LEN   11 FLAGS  6   -SREJ #: 1397900618
+RECV          SEQ#   6 LEN 1007 FLAGS 16   -Data #:    6
+SEND MSG#  18 SEQ#   7 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   6 LEN 1007 FLAGS 16   -Data #:    6
+SEND MSG#  19 SEQ#   7 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   7 LEN 1007 FLAGS 16   -Data #:    7
+SEND MSG#  20 SEQ#   8 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   8 LEN 1007 FLAGS 16   -Data #:    8 - RECV Corrupted packet
+SEND MSG#  21 SEQ#   8 LEN   11 FLAGS  6   -SREJ #: 1397900618
+RECV          SEQ#   8 LEN 1007 FLAGS 16   -Data #:    8
+SEND MSG#  22 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664
+SEND MSG#  23 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664
+SEND MSG#  24 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664 - DROPPED 
+SEND MSG#  25 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664
+SEND MSG#  26 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664
+SEND MSG#  27 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664 - DROPPED 
+SEND MSG#  28 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664
+SEND MSG#  29 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664 - DROPPED 
+SEND MSG#  30 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664
+SEND MSG#  31 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664
+SEND MSG#  32 SEQ#   9 LEN    9 FLAGS  5   -RR #:   1381105664
+======== SeqNo Report ========
+  Msgs (Total)       :    32
+  Msgs (Unique SeqNo):    10
+==============================
+argc: 8----- FSM: STATE_INIT -----
+Server info - IP: ::ffff:127.0.0.1 Port: 41418 
+----- FSM: STATE_HANDSHAKE -----
+Sent filename packet: test_files/medium.dat
+Handshake attempt 1...
+No ACK received. Retrying handshake...
+Server info - IP: ::ffff:127.0.0.1 Port: 41418 
+Sent filename packet: test_files/medium.dat
+Handshake attempt 2...
+Received ACK from server.
+ACK Payload: "Ok"
+Handshake successful! Proceeding to file reception at port: 37503
+----- FSM: STATE_FILE_RECEIVE -----
+Writing packet 0 to file
+Timeout 1/10
+Writing packet 1 to file
+Writing packet 2 to file
+Writing packet 3 to file
+Writing packet 4 to file
+Writing packet 5 to file
+Timeout 1/10
+Writing packet 6 to file
+Duplicate packet 6
+Writing packet 7 to file
+Writing packet 8 to file
+Timeout 1/10
+Timeout 2/10
+Timeout 3/10
+Timeout 4/10
+Timeout 5/10
+Timeout 6/10
+Timeout 7/10
+Timeout 8/10
+Timeout 9/10
+Timeout 10/10
+----- File Transfer done! -----
+Client shutdown complete.
+
+real	0m14.025s
+user	0m0.006s
+sys	0m0.000s

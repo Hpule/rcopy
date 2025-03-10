@@ -175,95 +175,95 @@ int waitForInitialPacket(ServerContext *server, char *buffer, int bufferSize) {
 
 
 
-    // printf("----- CHILD: BEGIN -----\n");
+    printf("----- CHILD: BEGIN -----\n");
 
-    // sendErr_init(child->error_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
+    sendErr_init(child->error_rate, DROP_ON, FLIP_OFF, DEBUG_ON, RSEED_ON);
 
-    // struct sockaddr_in6 src;
-    // socklen_t srcLen = sizeof(src);
-    // char filePath[256];
-    // snprintf(filePath, sizeof(filePath), "test_files/%s.txt", child->filename);
+    struct sockaddr_in6 src;
+    socklen_t srcLen = sizeof(src);
+    char filePath[256];
+    snprintf(filePath, sizeof(filePath), "test_files/%s.txt", child->filename);
 
-    // FILE *file = fopen(filePath, "rb");
-    // if (!file) {
-    //     perror("Error opening file");
-    //     close(child->socketNum);
-    //     return;
-    // }
+    FILE *file = fopen(filePath, "rb");
+    if (!file) {
+        perror("Error opening file");
+        close(child->socketNum);
+        return;
+    }
 
-    // printf("----- CHILD: PACKET TRANSFER -----\n");
+    printf("----- CHILD: PACKET TRANSFER -----\n");
 
-    // // Initialize the circular buffer with capacity = window size and payload size = child->bufSize
-    // CircularBuffer* cb = initCircularBuffer(child->winSize, child->bufSize);
+    // Initialize the circular buffer with capacity = window size and payload size = child->bufSize
+    CircularBuffer* cb = initCircularBuffer(child->winSize, child->bufSize);
 
-    // // Main sending loop.
-    // while (!child->eof && child->attempts < MAX_ATTEMPTS) {
-    //     // When the window is not full, send a new packet.
-    //     if (!is_full(cb)) {
-    //         printf("----- CHILD: SENDING PACKET (WINDOW OPEN) -----\n");
+    // Main sending loop.
+    while (!child->eof && child->attempts < MAX_ATTEMPTS) {
+        // When the window is not full, send a new packet.
+        if (!is_full(cb)) {
+            printf("----- CHILD: SENDING PACKET (WINDOW OPEN) -----\n");
 
             
-    //         // Read file data up to the desired payload size.
-    //         uint8_t payload[MAX_PAYLOAD];
-    //         int bytesRead = fread(payload, 1, child->bufSize, file);
-    //         if (bytesRead < child->bufSize) {
-    //             // EOF reached
-    //             child->eof = true;
-    //             pdu_header eofHeader;
-    //             eofHeader.seq = htonl(get_lowest_unack_seq());  // You may create a similar getter using cb->lower
-    //             eofHeader.flag = 10; // EOF flag
-    //             eofHeader.checksum = 0;
-    //             sendPdu(child->socketNum, &child->client, eofHeader, NULL, 0);
-    //             printf("Reached EOF, sending EOF packet for seq %u\n", get_lowest_unack_seq());
-    //             break;
-    //         }
+            // Read file data up to the desired payload size.
+            uint8_t payload[MAX_PAYLOAD];
+            int bytesRead = fread(payload, 1, child->bufSize, file);
+            if (bytesRead < child->bufSize) {
+                // EOF reached
+                child->eof = true;
+                pdu_header eofHeader;
+                eofHeader.seq = htonl(get_lowest_unack_seq());  // You may create a similar getter using cb->lower
+                eofHeader.flag = 10; // EOF flag
+                eofHeader.checksum = 0;
+                sendPdu(child->socketNum, &child->client, eofHeader, NULL, 0);
+                printf("Reached EOF, sending EOF packet for seq %u\n", get_lowest_unack_seq());
+                break;
+            }
 
-    //         // Get the next sequence number from your circular buffer (using current field)
-    //         uint32_t seqToSend = cb->current;
-    //         printf("Preparing to send packet with seq %u, payload = %d bytes\n", seqToSend, bytesRead);
+            // Get the next sequence number from your circular buffer (using current field)
+            uint32_t seqToSend = cb->current;
+            printf("Preparing to send packet with seq %u, payload = %d bytes\n", seqToSend, bytesRead);
 
-    //         pdu_header header;
-    //         header.seq = htonl(seqToSend);
-    //         header.flag = 16;  // Data packet flag
-    //         header.checksum = 0;
+            pdu_header header;
+            header.seq = htonl(seqToSend);
+            header.flag = 16;  // Data packet flag
+            header.checksum = 0;
 
-    //         // Calculate total PDU size: HEADER_SIZE + bytesRead. (Ensure it's within MAX_PDU_SIZE.)
-    //         int totalPduSize = HEADER_SIZE + bytesRead;
-    //         if (totalPduSize > MAX_PDU_SIZE) {
-    //             fprintf(stderr, "Error: total PDU size (%d) exceeds MAX_PDU_SIZE (%d)\n", totalPduSize, MAX_PDU_SIZE);
-    //             break;
-    //         }
+            // Calculate total PDU size: HEADER_SIZE + bytesRead. (Ensure it's within MAX_PDU_SIZE.)
+            int totalPduSize = HEADER_SIZE + bytesRead;
+            if (totalPduSize > MAX_PDU_SIZE) {
+                fprintf(stderr, "Error: total PDU size (%d) exceeds MAX_PDU_SIZE (%d)\n", totalPduSize, MAX_PDU_SIZE);
+                break;
+            }
 
-    //         int sent = sendPdu(child->socketNum, &child->client, header, (char*)payload, bytesRead);
-    //         if (sent < 0) {
-    //             fprintf(stderr, "Failed to send data packet for seq %u\n", seqToSend);
-    //         } else {
-    //             printf("Sent data packet with seq %u (%d bytes payload, %d total bytes)\n",
-    //                    seqToSend, bytesRead, totalPduSize);
-    //         }
+            int sent = sendPdu(child->socketNum, &child->client, header, (char*)payload, bytesRead);
+            if (sent < 0) {
+                fprintf(stderr, "Failed to send data packet for seq %u\n", seqToSend);
+            } else {
+                printf("Sent data packet with seq %u (%d bytes payload, %d total bytes)\n",
+                       seqToSend, bytesRead, totalPduSize);
+            }
 
-    //         // Write packet into the circular buffer.
-    //         writeCircularBuffer(cb, payload, bytesRead);
+            // Write packet into the circular buffer.
+            writeCircularBuffer(cb, payload, bytesRead);
 
-    //         // Print the current state of the circular buffer.
-    //         printCircularBuffer(cb);
-    //     }
-    //     else {
-    //         // When the window is full, you would normally process ACKs, retransmit, etc.
-    //         // For debugging, just print the state and increment an attempt.
-    //         printf("----- CHILD: WINDOW FULL -----\n");
-    //         printCircularBuffer(cb);
-    //         child->attempts++;
-    //         if(child->attempts > MAX_ATTEMPTS) break;
-    //     }
-    // }
+            // Print the current state of the circular buffer.
+            printCircularBuffer(cb);
+        }
+        else {
+            // When the window is full, you would normally process ACKs, retransmit, etc.
+            // For debugging, just print the state and increment an attempt.
+            printf("----- CHILD: WINDOW FULL -----\n");
+            printCircularBuffer(cb);
+            child->attempts++;
+            if(child->attempts > MAX_ATTEMPTS) break;
+        }
+    }
 
-    // // Clean up the circular buffer.
-    // freeCircularBuffer(cb);
-    // fclose(file);
-    // printf("----- CHILD: DONE -----\n");
-    // printf("File transfer complete.\n");
-// }
+    // Clean up the circular buffer.
+    freeCircularBuffer(cb);
+    fclose(file);
+    printf("----- CHILD: DONE -----\n");
+    printf("File transfer complete.\n");
+}
 
 void processRR(ChildContent *child, int seq){
     printf("----- CHILD: PROCESS RR -----\n");

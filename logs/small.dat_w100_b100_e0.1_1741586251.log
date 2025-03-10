@@ -1,0 +1,50 @@
+Send Err-INIT ErrRate: 0.10 Drop: Y Flip: N Rand: Y Debug: Y
+SEND MSG#   1 SEQ#   0 LEN   36 FLAGS  8   -FNAME request
+RECV          SEQ#   0 LEN    9 FLAGS  9   -FNAME response
+RECV          SEQ#   0 LEN  107 FLAGS 16   -Data #:    0
+SEND MSG#   2 SEQ#   1 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   1 LEN  107 FLAGS 16   -Data #:    1
+SEND MSG#   3 SEQ#   2 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   2 LEN  107 FLAGS 16   -Data #:    2
+SEND MSG#   4 SEQ#   3 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   3 LEN  107 FLAGS 16   -Data #:    3
+SEND MSG#   5 SEQ#   4 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   4 LEN  107 FLAGS 16   -Data #:    4
+SEND MSG#   6 SEQ#   5 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   5 LEN  107 FLAGS 16   -Data #:    5
+SEND MSG#   7 SEQ#   6 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   6 LEN  107 FLAGS 16   -Data #:    6
+SEND MSG#   8 SEQ#   7 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   7 LEN  107 FLAGS 16   -Data #:    7
+SEND MSG#   9 SEQ#   8 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   8 LEN    7 FLAGS 10   -User defined 
+SEND MSG#  10 SEQ#   0 LEN   14 FLAGS 10   -User defined 
+======== SeqNo Report ========
+  Msgs (Total)       :    10
+  Msgs (Unique SeqNo):     9
+==============================
+argc: 8----- FSM: STATE_INIT -----
+Server info - IP: ::ffff:127.0.0.1 Port: 41418 
+----- FSM: STATE_HANDSHAKE -----
+Sent filename packet: test_files/small.dat
+Handshake attempt 1...
+Received ACK from server.
+ACK Payload: "Ok"
+Handshake successful! Proceeding to file reception at port: 49287
+----- FSM: STATE_FILE_RECEIVE -----
+Writing packet 0 to file
+Writing packet 1 to file
+Writing packet 2 to file
+Writing packet 3 to file
+Writing packet 4 to file
+Writing packet 5 to file
+Writing packet 6 to file
+Writing packet 7 to file
+EOF received and acknowledged
+Sent EOF ACK with seq=8
+----- File Transfer done! -----
+Client shutdown complete.
+
+real	0m0.003s
+user	0m0.003s
+sys	0m0.000s

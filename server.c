@@ -10,7 +10,6 @@
 #include <dirent.h>
 #include <stdbool.h>
 
-
 #include "gethostbyname.h"
 #include "networks.h"
 #include "safeUtil.h"
@@ -23,7 +22,6 @@
 typedef enum {
     STATE_WAIT_PACKET,
     STATE_TRANSFER_TO_CHILD,
-    STATE_DONE
 } server_state_t;
 
 // ----- Server Context Structure ----- 
@@ -65,25 +63,21 @@ void childInfo(ChildContext *child, ServerContext *server);
 
 // ----- Child Functions ----- 
 void runChild(ChildContext *child); 
-
 void transferData(ChildContext *child); 
-void send_data_packet(ChildContext *child, WindowBuffer *wb, uint32_t seq, bool isEOF); 
+void send_data_packet(ChildContext *child, WindowBuffer *wb, uint32_t seq, 
+                        bool isEOF, size_t bytesRead); 
+
 void send_next_data(ChildContext *child, WindowBuffer *wb, uint32_t *nextSeq, 
-    bool *eofSent, uint32_t *eofSeq, FILE *file);
+                    bool *eofSent, uint32_t *eofSeq, FILE *file);
+
 void retransmit_packets(ChildContext *child, WindowBuffer *wb, uint32_t base, 
-                       uint32_t nextSeq, bool eofSent, uint32_t eofSeq); 
+                        uint32_t nextSeq, bool eofSent, uint32_t eofSeq); 
 
-// void sendSREJ(ChildContext * child, WindowBuffer *wb); 
-// void processRR(); 
-// void processSREJ(); 
-
+void send_eof_packet(ChildContext *child, uint32_t seq); 
 int processClient(ChildContext *child, int dataLen, char *buffer);  
 bool lookupFilename(const char *filename); 
 
-
-
-int main ( int argc, char *argv[]  )
-{ 
+int main ( int argc, char *argv[]  ){ 
     ServerContext server; 
     memset(&server, 0, sizeof(ServerContext)); // Fixed sizeof issue
     server.portNum = checkArgs(argc, argv);
@@ -98,8 +92,7 @@ int main ( int argc, char *argv[]  )
     return 0;
 }
 
-int checkArgs(int argc, char *argv[])
-{
+int checkArgs(int argc, char *argv[]){
     // Checks args and returns port number
     int portNumber = 0;
 
@@ -240,46 +233,41 @@ void runChild(ChildContext *child) {
 
 void transferData(ChildContext *child){
     printf("----- CHILD: TRANSFER DATA -----\n");
-    char filePath[256]; 
-    snprintf(filePath, sizeof(filePath), "test_files/%s.txt", child->filename); 
+    // char filePath[256]; 
+    // snprintf(filePath, sizeof(filePath), "test_files/%s.txt", child->filename); 
 
-    FILE *file = fopen(filePath, "rb"); 
+    FILE *file = fopen(child->filename, "rb"); 
     if(!file){ perror("Error opening file"); return; }
 
-    WindowBuffer wb; 
-    init_window(&wb, child->winSize, child->bufSize, file);
-    uint32_t nextSeq = 0, base = 0;
-    bool eofSent = false, eofAcked = false;
-    uint32_t eofSeq = 0; 
+    WindowBuffer wb;        init_window(&wb, child->winSize, child->bufSize, file);
+    uint32_t nextSeq = 0,   base = 0,   eofSeq = 0;
+    bool eofSent = false,   eofAcked = false; 
 
     // ----- Initial Window of Packets -----
     printf("----- CHILD: SENDING DATA (INITIAL)-----\n");
     while (nextSeq < wb.window_size && !feof(file)) {
-        printf("----- CHILD: PACKET - SEQ: -----\n");
-
+        printf("----- CHILD: PACKET - SEQ: %u-----\n", nextSeq);
         size_t bytesRead = fread(wb.panes[nextSeq].data, 1, wb.buffer_size, file);
         wb.panes[nextSeq].seq_num = nextSeq;
-        
-        if (bytesRead < wb.buffer_size || feof(file)) {
-            eofSent = true;
-            eofSeq = nextSeq;
+                
+        if(bytesRead > 0){ send_data_packet(child, &wb, nextSeq, eofSent, bytesRead);     nextSeq++;}
+        if (bytesRead == 0 || feof(file)) {
+            printf("EO DETECTED at seq=%u\n", nextSeq);
+            send_eof_packet(child, nextSeq); 
+            eofSent = true;     eofSeq = nextSeq; nextSeq++;  
+            break;
         }
-        
-        send_data_packet(child, &wb, nextSeq, eofSent);
-        nextSeq++;
+
+
     }
 
     printf("----- CHILD: SENDING DATA (MAIN)-----\n");
-    // ----- Main Data Transfer Loop -----
-   // Main transfer loop
-   while (!eofAcked && child->attempts < MAX_ATTEMPTS) {
+    while (!eofAcked && child->attempts < MAX_ATTEMPTS) {
         int pollResult = pollCall(POLL_ONE_SEC);
         
         if (pollResult > 0) {
-            child->attempts = 0;
-            uint8_t buffer[MAX_PDU_SIZE];
-            int recvLen = safeRecvfrom(child->socketNum, buffer, MAX_PDU_SIZE, 0, 
-                            (struct sockaddr *)&child->client, (int *)&child->clientAddrLen);
+            child->attempts = 0; uint8_t buffer[MAX_PDU_SIZE];
+            int recvLen = safeRecvfrom(child->socketNum, buffer, MAX_PDU_SIZE, 0, (struct sockaddr *)&child->client, (int *)&child->clientAddrLen);
             
             if (recvLen > 0 && !in_cksum((unsigned short *)buffer, recvLen)) {
                 pdu_header header;
@@ -289,8 +277,7 @@ void transferData(ChildContext *child){
                 if (header.flag == 5) {  // RR
                     if (ackSeq > base) {
                         printf("RR: ack=%u (moving window: %u → %u)\n", ackSeq, base, ackSeq);
-                        slide_window(&wb, ackSeq - base);
-                        base = ackSeq;
+                        slide_window(&wb, ackSeq - base); base = ackSeq;
                         
                         // Send more packets if window opened
                         while (nextSeq < base + wb.window_size && !eofSent) {
@@ -301,49 +288,43 @@ void transferData(ChildContext *child){
                     }
                 } else if (header.flag == 6) {  // SREJ
                     printf("SREJ: Resending packet seq=%u\n", ackSeq);
-                    send_data_packet(child, &wb, ackSeq, (eofSent && ackSeq == eofSeq));
+                    size_t bytesRead = (eofSent && ackSeq == eofSeq) ? 0 : wb.buffer_size;
+                    send_data_packet(child, &wb, ackSeq, (eofSent && ackSeq == eofSeq), bytesRead);
                 } else if (header.flag == 10) {  // EOF ACK
-                    printf("EOF_ACK: Received for seq=%u\n", ackSeq);
-                    eofAcked = true;
+                    printf("EOF_ACK: Received for seq=%u\n", ackSeq); eofAcked = true;
                 }
             }
         } else { child->attempts++; retransmit_packets(child, &wb, base, nextSeq, eofSent, eofSeq);}
         
     }
-    
-    fclose(file);
-    free_window(&wb);
+    fclose(file); free_window(&wb);
 }
 
-void send_data_packet(ChildContext *child, WindowBuffer *wb, uint32_t seq, bool isEOF) {
+void send_eof_packet(ChildContext *child, uint32_t seq) {
+    pdu_header header = {
+        .seq = htonl(seq),
+        .flag = 10,  // EOF flag
+        .checksum = 0
+    };
+    
+    printf("SEND: seq=%u, flag=10, EOF (no data)\n", seq);
+    
+    // Send EOF with no data payload
+    sendPdu(child->socketNum, &child->client, header, "", 0);
+}
+
+void send_data_packet(ChildContext *child, WindowBuffer *wb, uint32_t seq, bool isEOF, size_t bytesRead) {
     pdu_header header = {
         .seq = htonl(seq),
         .flag = isEOF ? 10 : 16,  // 10=EOF, 16=data
         .checksum = 0
     };
-
-    printf("SEND: seq=%u, flag=%d, %s\n", seq, header.flag, isEOF ? "EOF" : "DATA");
-
-    if(isEOF) {
-        printf("\nSERVER - EOF PACKET CONTENT:\n");
-        printf("Sequence: %u\n", seq);
-        printf("Data length: %d bytes\n", wb->buffer_size);
-        printf("Data hex: ");
-        for(int i = 0; i < wb->buffer_size; i++) {
-        printf("%02x ", (unsigned char)wb->panes[seq % wb->window_size].data[i]);
-        }
-        printf("\nData text: \"");
-        for(int i = 0; i < wb->buffer_size; i++) {
-        char c = wb->panes[seq % wb->window_size].data[i];
-        if(c >= 32 && c <= 126) printf("%c", c);
-        else printf(".");
-        }
-        printf("\"\n");
-    }
     
-    // Cast to const char* to resolve the signedness warning
+    printf("SEND: seq=%u, flag=%d, %s\n", seq, header.flag, isEOF ? "EOF" : "DATA");
+    
+    // Use actual bytesRead instead of wb->buffer_size
     sendPdu(child->socketNum, &child->client, header, 
-           (const char*)wb->panes[seq % wb->window_size].data, wb->buffer_size);
+           (const char*)wb->panes[seq % wb->window_size].data, bytesRead);
 }
 
 void send_next_data(ChildContext *child, WindowBuffer *wb, uint32_t *nextSeq, 
@@ -358,52 +339,31 @@ void send_next_data(ChildContext *child, WindowBuffer *wb, uint32_t *nextSeq,
         printf("EOF DETECTED at seq=%u (read %zu bytes)\n", *nextSeq, bytesRead);
     }
     
-    send_data_packet(child, wb, *nextSeq, *eofSent && (*nextSeq == *eofSeq));
+    send_data_packet(child, wb, *nextSeq, *eofSent && (*nextSeq == *eofSeq), bytesRead);
     (*nextSeq)++;
 }
 
 void retransmit_packets(ChildContext *child, WindowBuffer *wb, uint32_t base, 
                        uint32_t nextSeq, bool eofSent, uint32_t eofSeq) {
+    printf("TIMEOUT: Retransmitting packets seq=%u to %u\n", base, nextSeq-1);
+    
     for (uint32_t i = base; i < nextSeq; i++) {
-        printf("TIMEOUT: Retransmitting packets seq=%u to %u\n", base, nextSeq-1);
-        send_data_packet(child, wb, i, eofSent && (i == eofSeq));
+        // Special case for the EOF packet
+        if (eofSent && i == eofSeq) {
+            // For EOF packet, send 0 bytes of data
+            send_data_packet(child, wb, i, true, 0);
+        } else {
+            // For data packets, use buffer_size (may be inefficient for the last packet)
+            send_data_packet(child, wb, i, false, wb->buffer_size);
+        }
     }
 }
-
-// int receiveParsePacket(int ){
-
-// }
-
-// void processRR(ChildContext *child, int seq, WindowBuffer *wb){
-//     printf("----- CHILD: PRCOCESS RR -----\n");
-
-
-
-// }
-
-// void processSREJ(ChildContext *child, int seq, WindowBuffer *wb){
-//     printf("----- CHILD: PRCOCESS SREJ -----\n");
-
-// }
-
-
-// void sendSREJ(ChildContext * child, WindowBuffer *wb){
-//     printf("Sending data packet\n"); 
-// }
-
-
-
-
-
 int processClient(ChildContext *child, int dataLen, char *buffer){
     printf("----- CHILD: PRCESSING CLIENT -----\n");
-
-    // Packet corruption check is assumed to be done before this function call
     
     pdu_header header;
     memcpy(&header, buffer, sizeof(pdu_header));
     
-    // Process filename packet (flag == 8)
     if (header.flag == 8) {
         // Minimum size check
         if (dataLen < (int)(sizeof(pdu_header) + 9)) {
@@ -411,17 +371,14 @@ int processClient(ChildContext *child, int dataLen, char *buffer){
             return -1;
         }
         
-        // Quick extraction of all needed data
         uint32_t *sizes_ptr = (uint32_t *)(buffer + sizeof(pdu_header));
         child->winSize = ntohl(sizes_ptr[0]);
         child->bufSize = ntohl(sizes_ptr[1]);
         
-        // Get filename
         uint8_t name_len = buffer[sizeof(pdu_header) + 8];
         memcpy(child->filename, buffer + sizeof(pdu_header) + 9, name_len);
         child->filename[name_len] = '\0';
         
-        // Create and send ACK/NACK
         pdu_header ack = {.seq = htonl(0), .flag = 9, .checksum = 0};
         const char *msg = lookupFilename(child->filename) ? "Ok" : "Not Ok";
         
@@ -429,32 +386,18 @@ int processClient(ChildContext *child, int dataLen, char *buffer){
             fprintf(stderr, "ERROR: Failed to send %s\n", msg);
             return -1;
         }
-        
-        // Return success only if file exists
         return strcmp(msg, "Ok") == 0 ? 0 : -1;
     }
-    
     return -1;  // Unrecognized packet type
 }
 
 bool lookupFilename(const char *filename) {
-    char filepath[MAX_FILENAME + 12]; // +12 for "test_files/" and null terminator
     
-    // Check if there's a '.' in the filename
-    if (strchr(filename, '.') == NULL) {
-        snprintf(filepath, sizeof(filepath), "test_files/%s.txt", filename);
-    } else {
-        snprintf(filepath, sizeof(filepath), "test_files/%s", filename);
-    }
-    
-    // Simply check if the file exists and is readable
-    if (access(filepath, R_OK) == 0) {
-        printf("File \"%s\" found and readable.\n", filepath);
+    if (access(filename, R_OK) == 0) {
+        printf("File \"%s\" found and readable.\n", filename);
         return true;
     } else {
-        printf("File \"%s\" not found or not readable.\n", filepath);
+        printf("File \"%s\" not found or not readable.\n", filename);
         return false;
     }
 }
-
-

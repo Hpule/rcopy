@@ -1,0 +1,20 @@
+Send Err-INIT ErrRate: 0.00 Drop: Y Flip: N Rand: Y Debug: Y
+SEND MSG#   1 SEQ#   0 LEN   47 FLAGS  8   -FNAME request
+RECV          SEQ#   0 LEN   13 FLAGS  9   -FNAME response
+Server responded with 'Not Ok'. Terminating.
+: Success
+======== SeqNo Report ========
+  Msgs (Total)       :     1
+  Msgs (Unique SeqNo):     1
+==============================
+argc: 8----- FSM: STATE_INIT -----
+Server info - IP: ::ffff:127.0.0.1 Port: 41418 
+----- FSM: STATE_HANDSHAKE -----
+Sent filename packet: test_files/nonexistent_file.dat
+Handshake attempt 1...
+Received ACK from server.
+ACK Payload: "Not Ok"
+
+real	0m0.002s
+user	0m0.002s
+sys	0m0.000s

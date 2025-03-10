@@ -1,0 +1,29 @@
+Send Err-INIT ErrRate: 0.20 Drop: Y Flip: N Rand: Y Debug: Y
+SEND MSG#   1 SEQ#   0 LEN   36 FLAGS  8   -FNAME request
+RECV          SEQ#   0 LEN    9 FLAGS  9   -FNAME response
+RECV          SEQ#   0 LEN  807 FLAGS 16   -Data #:    0
+SEND MSG#   2 SEQ#   1 LEN    9 FLAGS  5   -RR #:   1381105664
+RECV          SEQ#   1 LEN    7 FLAGS 10   -User defined 
+SEND MSG#   3 SEQ#   0 LEN   14 FLAGS 10   -User defined 
+======== SeqNo Report ========
+  Msgs (Total)       :     3
+  Msgs (Unique SeqNo):     2
+==============================
+argc: 8----- FSM: STATE_INIT -----
+Server info - IP: ::ffff:127.0.0.1 Port: 41418 
+----- FSM: STATE_HANDSHAKE -----
+Sent filename packet: test_files/small.dat
+Handshake attempt 1...
+Received ACK from server.
+ACK Payload: "Ok"
+Handshake successful! Proceeding to file reception at port: 56223
+----- FSM: STATE_FILE_RECEIVE -----
+Writing packet 0 to file
+EOF received and acknowledged
+Sent EOF ACK with seq=1
+----- File Transfer done! -----
+Client shutdown complete.
+
+real	0m0.002s
+user	0m0.002s
+sys	0m0.000s

@@ -229,9 +229,10 @@ rcopy_state_t stateHandshake(RcopyContext *rcopy)
                             return STATE_FILE_RECEIVE;
                         } 
                         else { 
-                            printf("Server responded with 'Not Ok'. Terminating.\n"); 
-                            return STATE_DONE;}
-
+                            perror("Server responded with 'Not Ok'. Terminating.\n");
+                            close(rcopy->socketNum); 
+                            exit(EXIT_FAILURE); 
+                        }
                     default:
                         printf("Unexpected packet (flag=%d) received. Ignoring.\n", header.flag);
                         break;
@@ -245,7 +246,6 @@ rcopy_state_t stateHandshake(RcopyContext *rcopy)
         rcopy->socketNum = setupUdpClientToServer(&rcopy->server, rcopy->remoteMachine, rcopy->portNumber);
         pollCall(POLL_ONE_SEC);  // Backoff delay.
     }
-
     printf("Max handshake attempts reached. Terminating.\n");
     return STATE_DONE;
 }
@@ -279,27 +279,23 @@ void sendFilename(int socketNum, struct sockaddr_in6 *server, char* filename, in
     int bytesSent = sendPdu(socketNum, server, header, pdu, pduLen);
     if (bytesSent < 0) {
         fprintf(stderr, "sendPdu failed in sendFilename\n"); 
+        close(socketNum); 
         exit(EXIT_FAILURE);
     }
     printf("Sent filename packet: %s\n", filename);
 }
 
 rcopy_state_t stateFileReceive(RcopyContext *rcopy) {
-    char filePath[256];
-    snprintf(filePath, sizeof(filePath), "rcopy_download_files/%s.txt", rcopy->rcopy_filename);
-    
-    FILE *outputFile = fopen(filePath, "wb");
+    FILE *outputFile = fopen(rcopy->rcopy_filename, "wb");
     if(!outputFile) {
         perror("Error opening file for writing");
-        return STATE_DONE;
+        close(rcopy->socketNum); 
+        exit(EXIT_FAILURE); 
     }
     
-    // Initialize window buffer for receiving
-    WindowBuffer wb;
-    init_window(&wb, rcopy->windowsize, rcopy->buffersize, NULL);
+    WindowBuffer wb;            init_window(&wb, rcopy->windowsize, rcopy->buffersize, NULL);
     
-    uint32_t expectedSeq = 0;
-    rcopy->attempts = 0;
+    uint32_t expectedSeq = 0;   rcopy->attempts = 0;
     
     while(!rcopy->eof && rcopy->attempts < MAX_ATTEMPTS) {
         int pollResult = pollCall(POLL_ONE_SEC);
@@ -310,16 +306,13 @@ rcopy_state_t stateFileReceive(RcopyContext *rcopy) {
             sendRR(expectedSeq, rcopy); // Resend current RR on timeout
             continue;
         }
-        
-        // Reset timeout counter on successful poll
         rcopy->attempts = 0;
         
         // Receive and check packet
         char packet[MAX_PDU_SIZE];
         struct sockaddr_in6 src;
         socklen_t srcLen = sizeof(src);
-        int packetLen = safeRecvfrom(rcopy->socketNum, packet, MAX_PDU_SIZE, 0, 
-                                    (struct sockaddr*)&src, (int*)&srcLen);
+        int packetLen = safeRecvfrom(rcopy->socketNum, packet, MAX_PDU_SIZE, 0, (struct sockaddr*)&src, (int*)&srcLen);
         
         if(packetLen < 0 || in_cksum((uint16_t*)packet, packetLen) != 0) {
             sendSREJ(expectedSeq, rcopy);
@@ -332,21 +325,6 @@ rcopy_state_t stateFileReceive(RcopyContext *rcopy) {
         uint32_t seqNum = ntohl(header.seq);
         
         if(header.flag == 10) { // EOF
-            printf("\nCLIENT - RECEIVED EOF PACKET:\n");
-            printf("Sequence: %u\n", seqNum);
-            printf("Received length: %ld bytes\n", packetLen - HEADER_SIZE);
-            printf("Data hex: ");
-            for(int i = 0; i < packetLen - HEADER_SIZE; i++) {
-                printf("%02x ", (unsigned char)packet[HEADER_SIZE + i]);
-            }
-            printf("\nData text: \"");
-            for(int i = 0; i < packetLen - HEADER_SIZE; i++) {
-                char c = packet[HEADER_SIZE + i];
-                if(c >= 32 && c <= 126) printf("%c", c);
-                else printf(".");
-            }
-            printf("\"\n");
-
             if(seqNum == expectedSeq) {
                 printf("EOF received and acknowledged\n");
                 fwrite(packet + HEADER_SIZE, 1, packetLen - HEADER_SIZE, outputFile);
@@ -357,7 +335,6 @@ rcopy_state_t stateFileReceive(RcopyContext *rcopy) {
             }
         }
         else if(seqNum >= expectedSeq && seqNum < expectedSeq + rcopy->windowsize) {
-            // Store packet in window buffer
             uint32_t index = seqNum % wb.window_size;
             wb.panes[index].seq_num = seqNum;
             memcpy(wb.panes[index].data, packet + HEADER_SIZE, packetLen - HEADER_SIZE);
@@ -367,8 +344,7 @@ rcopy_state_t stateFileReceive(RcopyContext *rcopy) {
                 // Write current packet and all consecutive buffered packets
                 while(wb.panes[expectedSeq % wb.window_size].seq_num == expectedSeq) {
                     printf("Writing packet %u to file\n", expectedSeq);
-                    fwrite(wb.panes[expectedSeq % wb.window_size].data, 1, 
-                          wb.buffer_size, outputFile);
+                    fwrite(wb.panes[expectedSeq % wb.window_size].data, 1, wb.buffer_size, outputFile);
                     expectedSeq++;
                 }
                 sendRR(expectedSeq, rcopy);
@@ -378,19 +354,12 @@ rcopy_state_t stateFileReceive(RcopyContext *rcopy) {
                 sendSREJ(expectedSeq, rcopy);
             }
         } else if(seqNum < expectedSeq) {
-            // Duplicate packet
-            printf("Duplicate packet %u\n", seqNum);
-            sendRR(expectedSeq, rcopy);
+            printf("Duplicate packet %u\n", seqNum);        sendRR(expectedSeq, rcopy);
         } else {
-            // Packet outside window
-            printf("Packet %u outside window\n", seqNum);
-            sendSREJ(expectedSeq, rcopy);
+            printf("Packet %u outside window\n", seqNum);   sendSREJ(expectedSeq, rcopy);
         }
     }
-    
-    fclose(outputFile);
-    free_window(&wb);
-    return STATE_DONE;
+    fclose(outputFile);     free_window(&wb);       return STATE_DONE;
 }
 
 void sendRR(int RR, RcopyContext *rcopy) {
